@@ -24,3 +24,10 @@ Thumbs.db
 
 # uv
 uv.lock
+
+# Local benchmark media and generated transcripts
+benchmark/input/
+benchmark/results/
+
+# Local workspace metadata
+codedb.snapshot

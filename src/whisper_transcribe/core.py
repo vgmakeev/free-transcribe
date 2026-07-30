@@ -1,138 +1,703 @@
-"""
-Core transcription logic using MLX Whisper (optimized for Apple Silicon).
-"""
+"""Core transcription and speaker diarization logic."""
+
+from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from datetime import datetime
-
-import mlx_whisper
+import platform
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from difflib import SequenceMatcher
+from typing import Any
 
 SUPPORTED_FORMATS = {
-    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma", ".aac",
-    ".mp4", ".webm", ".mkv", ".avi", ".mov",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".flac",
+    ".ogg",
+    ".wma",
+    ".aac",
+    ".mp4",
+    ".webm",
+    ".mkv",
+    ".avi",
+    ".mov",
 }
 
-# MLX Whisper models from Hugging Face
-AVAILABLE_MODELS = {
-    "tiny": "mlx-community/whisper-tiny",
-    "base": "mlx-community/whisper-base",
-    "small": "mlx-community/whisper-small",
-    "medium": "mlx-community/whisper-medium",
-    "large": "mlx-community/whisper-large-v3",
-    "large-v2": "mlx-community/whisper-large-v2-mlx",
-    "large-v3": "mlx-community/whisper-large-v3",
-    "turbo": "mlx-community/whisper-large-v3-turbo",
+AVAILABLE_ENGINES = ("qwen", "parakeet")
+DEFAULT_ENGINE = "qwen"
+DEFAULT_MODELS = {
+    "qwen": "Qwen/Qwen3-ASR-1.7B",
+    "parakeet": "mlx-community/parakeet-tdt-0.6b-v3",
+}
+DEFAULT_MODEL = DEFAULT_MODELS[DEFAULT_ENGINE]
+DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+
+LANGUAGE_NAMES = {
+    "ru": "Russian",
+    "en": "English",
+    "de": "German",
+    "es": "Spanish",
+    "fr": "French",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "uk": "Ukrainian",
 }
 
+ProgressCallback = Callable[[str, str], None]
 
-@dataclass
-class TranscriptSegment:
-    """A single segment of transcription."""
+
+@dataclass(frozen=True)
+class SpeakerTurn:
+    """A time interval assigned to one speaker by a diarization model."""
+
+    start: float
+    end: float
+    speaker: str
+
+
+@dataclass(frozen=True)
+class TranscriptWord:
+    """A word with timestamps produced by an ASR engine or aligner."""
+
     start: float
     end: float
     text: str
 
 
 @dataclass
+class TranscriptSegment:
+    """A single segment of transcription."""
+
+    start: float
+    end: float
+    text: str
+    speaker: str | None = None
+
+
+@dataclass
 class TranscriptResult:
     """Result of transcription."""
+
     text: str
     segments: list[TranscriptSegment]
     language: str
     duration_min: float
     device: str
     model: str
+    engine: str = DEFAULT_ENGINE
+    speaker_count: int = 0
+    diarization_model: str | None = None
+    words: list[TranscriptWord] = field(default_factory=list)
+
+
+@dataclass
+class DiarizationResult:
+    """Raw and exclusive pyannote turns from one diarization run."""
+
+    turns: list[SpeakerTurn]
+    exclusive_turns: list[SpeakerTurn]
+    model: str
+    device: str
 
 
 def format_timestamp(seconds: float) -> str:
-    """Format seconds as MM:SS."""
-    mins = int(seconds // 60)
-    secs = int(seconds % 60)
+    """Format seconds as MM:SS or HH:MM:SS for long recordings."""
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    mins, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
     return f"{mins:02d}:{secs:02d}"
+
+
+def _overlap(start: float, end: float, turn: SpeakerTurn) -> float:
+    return max(0.0, min(end, turn.end) - max(start, turn.start))
+
+
+def _speaker_for_interval(
+    start: float,
+    end: float,
+    turns: list[SpeakerTurn],
+) -> str | None:
+    """Choose the speaker with the greatest overlap with a timed interval."""
+    if not turns:
+        return None
+
+    best_turn = max(turns, key=lambda turn: _overlap(start, end, turn))
+    if _overlap(start, end, best_turn) > 0:
+        return best_turn.speaker
+
+    # Timestamp boundaries from the two models can differ slightly. In that
+    # case, use the nearest diarization turn rather than dropping the speaker.
+    midpoint = (start + end) / 2
+
+    def distance(turn: SpeakerTurn) -> float:
+        if midpoint < turn.start:
+            return turn.start - midpoint
+        if midpoint > turn.end:
+            return midpoint - turn.end
+        return 0.0
+
+    nearest = min(turns, key=distance)
+    if distance(nearest) <= 1.0:
+        return nearest.speaker
+
+    # VAD can occasionally leave a short hole even while quiet speech is
+    # present. Bridge only bounded holes that have diarization turns on both
+    # sides; genuine long silence (or text outside the diarized range) stays
+    # unlabeled.
+    previous = [turn for turn in turns if turn.end <= midpoint]
+    following = [turn for turn in turns if turn.start >= midpoint]
+    if previous and following:
+        left = max(previous, key=lambda turn: turn.end)
+        right = min(following, key=lambda turn: turn.start)
+        if right.start - left.end <= 15.0:
+            return left.speaker if distance(left) <= distance(right) else right.speaker
+    return None
+
+
+def _display_speaker_map(
+    speakers: Iterable[str],
+    speaker_names: list[str] | None,
+) -> dict[str, str]:
+    """Map model labels to stable labels in order of first appearance."""
+    mapping: dict[str, str] = {}
+    cleaned_names = [name.strip() for name in (speaker_names or []) if name.strip()]
+    for speaker in speakers:
+        if speaker in mapping:
+            continue
+        index = len(mapping)
+        mapping[speaker] = (
+            cleaned_names[index]
+            if index < len(cleaned_names)
+            else f"Speaker {index + 1}"
+        )
+    return mapping
+
+
+def _join_word_texts(words: list[TranscriptWord]) -> str:
+    """Preserve leading-space and punctuation conventions across engines."""
+    pieces = [word.text for word in words]
+    if any(piece[:1].isspace() for piece in pieces):
+        return "".join(pieces).strip()
+    return " ".join(piece.strip() for piece in pieces).strip()
+
+
+def assign_speakers_to_words(
+    words: list[TranscriptWord],
+    turns: list[SpeakerTurn],
+    speaker_names: list[str] | None = None,
+    max_merge_gap: float = 1.5,
+) -> list[TranscriptSegment]:
+    """Assign words to speakers and merge adjacent words into speaker turns."""
+    if not words:
+        return []
+
+    assigned = [
+        (word, _speaker_for_interval(word.start, word.end, turns)) for word in words
+    ]
+    for index, (word, speaker) in enumerate(assigned):
+        if speaker is not None:
+            continue
+        previous = next(
+            (item[1] for item in reversed(assigned[:index]) if item[1] is not None),
+            None,
+        )
+        following = next(
+            (item[1] for item in assigned[index + 1 :] if item[1] is not None),
+            None,
+        )
+        if previous is not None and previous == following:
+            assigned[index] = (word, previous)
+    mapping = _display_speaker_map(
+        (speaker for _, speaker in assigned if speaker is not None),
+        speaker_names,
+    )
+
+    grouped: list[tuple[list[TranscriptWord], str | None]] = []
+    for word, raw_speaker in assigned:
+        speaker = mapping.get(raw_speaker) if raw_speaker is not None else None
+        if (
+            grouped
+            and grouped[-1][1] == speaker
+            and word.start - grouped[-1][0][-1].end <= max_merge_gap
+        ):
+            grouped[-1][0].append(word)
+        else:
+            grouped.append(([word], speaker))
+
+    return [
+        TranscriptSegment(
+            start=group_words[0].start,
+            end=group_words[-1].end,
+            text=_join_word_texts(group_words),
+            speaker=speaker,
+        )
+        for group_words, speaker in grouped
+    ]
+
+
+def restore_segment_punctuation(
+    segments: list[TranscriptSegment],
+    punctuated_text: str,
+) -> list[TranscriptSegment]:
+    """Restore punctuation/casing from ASR text without changing timestamps."""
+    source_tokens = punctuated_text.split()
+    indexed_target_tokens = [
+        (segment_index, token)
+        for segment_index, segment in enumerate(segments)
+        for token in segment.text.split()
+    ]
+    if not source_tokens or not indexed_target_tokens:
+        return segments
+
+    def normalized(token: str) -> str:
+        return "".join(character for character in token.casefold() if character.isalnum())
+
+    target_items = [
+        (index, normalized(token))
+        for index, (_, token) in enumerate(indexed_target_tokens)
+        if normalized(token)
+    ]
+    source_items = [
+        (index, normalized(token))
+        for index, token in enumerate(source_tokens)
+        if normalized(token)
+    ]
+    matcher = SequenceMatcher(
+        None,
+        [item[1] for item in target_items],
+        [item[1] for item in source_items],
+    )
+    replacements: dict[int, str] = {}
+    for target_start, source_start, size in matcher.get_matching_blocks():
+        for offset in range(size):
+            target_index = target_items[target_start + offset][0]
+            source_index = source_items[source_start + offset][0]
+            replacements[target_index] = source_tokens[source_index]
+
+    tokens_by_segment: list[list[str]] = [[] for _ in segments]
+    for target_index, (segment_index, token) in enumerate(indexed_target_tokens):
+        tokens_by_segment[segment_index].append(replacements.get(target_index, token))
+
+    return [
+        TranscriptSegment(
+            start=segment.start,
+            end=segment.end,
+            text=" ".join(tokens_by_segment[index]),
+            speaker=segment.speaker,
+        )
+        for index, segment in enumerate(segments)
+    ]
+
+
+def _fallback_assign_segments(
+    segments: list[TranscriptSegment],
+    turns: list[SpeakerTurn],
+    speaker_names: list[str] | None,
+) -> list[TranscriptSegment]:
+    raw_speakers = [
+        _speaker_for_interval(segment.start, segment.end, turns) for segment in segments
+    ]
+    mapping = _display_speaker_map(
+        (speaker for speaker in raw_speakers if speaker is not None),
+        speaker_names,
+    )
+    return [
+        TranscriptSegment(
+            start=segment.start,
+            end=segment.end,
+            text=segment.text,
+            speaker=mapping.get(speaker) if speaker is not None else None,
+        )
+        for segment, speaker in zip(segments, raw_speakers)
+    ]
+
+
+def _words_from_items(items: Iterable[Any]) -> list[TranscriptWord]:
+    """Normalize dicts or aligned-token objects to timestamped words."""
+    words: list[TranscriptWord] = []
+    for item in items:
+        if isinstance(item, dict):
+            start = item.get("start")
+            end = item.get("end")
+            text = item.get("text", item.get("word", ""))
+        else:
+            start = getattr(item, "start", None)
+            end = getattr(item, "end", None)
+            text = getattr(item, "text", "")
+        if start is None or end is None:
+            continue
+        words.append(TranscriptWord(float(start), float(end), str(text)))
+    return words
+
+
+@dataclass
+class _EngineOutput:
+    text: str
+    segments: list[TranscriptSegment]
+    words: list[TranscriptWord]
+    language: str
+    duration_min: float
+    device: str
+
+
+def _require_apple_silicon(engine: str) -> None:
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise RuntimeError(
+            f"The {engine} MLX backend requires Apple Silicon. "
+            "CUDA and CPU adapters are planned but are not yet verified."
+        )
+
+
+def _qwen_language(language: str | None) -> str | None:
+    if not language:
+        return None
+    return LANGUAGE_NAMES.get(language.casefold(), language)
+
+
+def _transcribe_qwen(
+    file_path: str,
+    *,
+    model_name: str,
+    language: str | None,
+    context: str | None,
+    need_words: bool,
+) -> _EngineOutput:
+    _require_apple_silicon("Qwen3-ASR")
+    try:
+        from mlx_qwen3_asr import transcribe as qwen_transcribe
+    except ImportError as exc:
+        raise RuntimeError(
+            "Qwen support is not installed. Reinstall free-transcribe with "
+            "the default Apple dependencies."
+        ) from exc
+
+    result = qwen_transcribe(
+        file_path,
+        model=model_name,
+        context=context or "",
+        language=_qwen_language(language),
+        return_timestamps=need_words,
+        return_chunks=True,
+    )
+    raw_words = list(result.segments or [])
+    words = _words_from_items(raw_words)
+    chunks = list(result.chunks or [])
+    segments = [
+        TranscriptSegment(
+            start=float(chunk.get("start", 0.0)),
+            end=float(chunk.get("end", chunk.get("start", 0.0))),
+            text=str(chunk.get("text", "")).strip(),
+        )
+        for chunk in chunks
+        if str(chunk.get("text", "")).strip()
+    ]
+    if not segments and words:
+        segments = [
+            TranscriptSegment(word.start, word.end, word.text.strip()) for word in words
+        ]
+    duration = max(
+        [segment.end for segment in segments] + [word.end for word in words] + [0.0]
+    )
+    return _EngineOutput(
+        text=str(result.text).strip(),
+        segments=segments,
+        words=words,
+        language=str(result.language or language or "unknown"),
+        duration_min=duration / 60,
+        device="mlx",
+    )
+
+
+def _transcribe_parakeet(
+    file_path: str,
+    *,
+    model_name: str,
+    language: str | None,
+    context: str | None,
+) -> _EngineOutput:
+    _require_apple_silicon("Parakeet")
+    try:
+        from mlx_audio.stt.utils import load
+    except ImportError as exc:
+        raise RuntimeError(
+            "Parakeet support is not installed. Install the 'parakeet' extra."
+        ) from exc
+
+    if context:
+        # Parakeet does not currently expose contextual biasing in mlx-audio.
+        context = None
+    model = load(model_name)
+    result = model.generate(file_path)
+    sentences = list(getattr(result, "sentences", []) or [])
+    segments = [
+        TranscriptSegment(
+            start=float(sentence.start),
+            end=float(sentence.end),
+            text=str(sentence.text).strip(),
+        )
+        for sentence in sentences
+        if str(sentence.text).strip()
+    ]
+    words = _words_from_items(
+        token for sentence in sentences for token in (sentence.tokens or [])
+    )
+    duration = max(
+        [segment.end for segment in segments] + [word.end for word in words] + [0.0]
+    )
+    return _EngineOutput(
+        text=str(getattr(result, "text", "")).strip(),
+        segments=segments,
+        words=words,
+        language=language or str(getattr(result, "language", "auto")),
+        duration_min=duration / 60,
+        device="mlx",
+    )
+
+
+def _validate_speaker_counts(
+    num_speakers: int | None,
+    min_speakers: int | None,
+    max_speakers: int | None,
+) -> None:
+    for name, value in (
+        ("num_speakers", num_speakers),
+        ("min_speakers", min_speakers),
+        ("max_speakers", max_speakers),
+    ):
+        if value is not None and value < 1:
+            raise ValueError(f"{name} must be at least 1")
+    if (
+        min_speakers is not None
+        and max_speakers is not None
+        and min_speakers > max_speakers
+    ):
+        raise ValueError("min_speakers cannot be greater than max_speakers")
+
+
+def diarize_media(
+    file_path: str,
+    *,
+    model_name: str = DEFAULT_DIARIZATION_MODEL,
+    token: str | None = None,
+    device: str = "auto",
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> DiarizationResult:
+    """Run pyannote and retain regular plus exclusive speaker turns."""
+    _validate_speaker_counts(num_speakers, min_speakers, max_speakers)
+    if device not in {"auto", "cpu", "mps", "cuda"}:
+        raise ValueError("diarization device must be one of: auto, cpu, mps, cuda")
+
+    try:
+        import torch
+        from pyannote.audio import Pipeline
+    except ImportError as exc:
+        raise RuntimeError(
+            "Speaker diarization is not installed. Install the optional dependencies "
+            "with: uv tool install 'free-transcribe[diarization] @ "
+            "git+https://github.com/vgmakeev/free-transcribe.git'"
+        ) from exc
+
+    if on_progress:
+        on_progress("diarization_loading", f"Loading diarization model {model_name}...")
+
+    access_token = token or os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
+    try:
+        pipeline = Pipeline.from_pretrained(model_name, token=access_token)
+        if pipeline is None:
+            raise RuntimeError("The model repository did not return a pipeline")
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not load the pyannote diarization model. Accept its terms at "
+            "https://huggingface.co/pyannote/speaker-diarization-community-1 and "
+            "set HF_TOKEN, or run `hf auth login`."
+        ) from exc
+
+    resolved_device = device
+    if resolved_device == "auto":
+        if torch.cuda.is_available():
+            resolved_device = "cuda"
+        elif torch.backends.mps.is_available():
+            resolved_device = "mps"
+        else:
+            resolved_device = "cpu"
+    try:
+        pipeline.to(torch.device(resolved_device))
+    except RuntimeError:
+        if device != "auto" or resolved_device == "cpu":
+            raise
+        resolved_device = "cpu"
+        pipeline.to(torch.device(resolved_device))
+
+    diarization_options = {
+        key: value
+        for key, value in {
+            "num_speakers": num_speakers,
+            "min_speakers": min_speakers,
+            "max_speakers": max_speakers,
+        }.items()
+        if value is not None
+    }
+
+    if on_progress:
+        on_progress(
+            "diarizing", f"Identifying speakers on {resolved_device.upper()}..."
+        )
+
+    try:
+        output = pipeline(file_path, **diarization_options)
+    except RuntimeError:
+        if device != "auto" or resolved_device == "cpu":
+            raise
+        if on_progress:
+            on_progress(
+                "diarizing",
+                f"{resolved_device.upper()} diarization failed; retrying on CPU...",
+            )
+        pipeline.to(torch.device("cpu"))
+        resolved_device = "cpu"
+        output = pipeline(file_path, **diarization_options)
+
+    annotation = getattr(output, "speaker_diarization", output)
+    turns = [
+        SpeakerTurn(float(turn.start), float(turn.end), str(speaker))
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
+    ]
+    exclusive_annotation = getattr(output, "exclusive_speaker_diarization", None)
+    if exclusive_annotation is None:
+        exclusive_turns = turns
+    else:
+        exclusive_turns = [
+            SpeakerTurn(float(turn.start), float(turn.end), str(speaker))
+            for turn, _, speaker in exclusive_annotation.itertracks(yield_label=True)
+        ]
+    if on_progress:
+        on_progress("diarization_complete", "Speaker diarization complete")
+    return DiarizationResult(
+        turns=turns,
+        exclusive_turns=exclusive_turns,
+        model=model_name,
+        device=resolved_device,
+    )
+
+
+def diarize_file(
+    file_path: str,
+    *,
+    model_name: str = DEFAULT_DIARIZATION_MODEL,
+    token: str | None = None,
+    device: str = "auto",
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> list[SpeakerTurn]:
+    """Run pyannote and return exclusive turns for ASR word assignment."""
+    result = diarize_media(
+        file_path,
+        model_name=model_name,
+        token=token,
+        device=device,
+        num_speakers=num_speakers,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers,
+        on_progress=on_progress,
+    )
+    return result.exclusive_turns
 
 
 def transcribe_file(
     file_path: str,
-    model_name: str = "medium",
+    model_name: str | None = None,
     language: str | None = None,
     prompt: str | None = None,
-    on_progress: callable = None,
+    on_progress: ProgressCallback | None = None,
+    *,
+    engine: str = DEFAULT_ENGINE,
+    diarize: bool = False,
+    diarization_model: str = DEFAULT_DIARIZATION_MODEL,
+    diarization_device: str = "auto",
+    hf_token: str | None = None,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    speaker_names: list[str] | None = None,
+    word_timestamps: bool = False,
 ) -> TranscriptResult:
-    """
-    Transcribe audio/video file using MLX Whisper.
-    
-    Args:
-        file_path: Path to audio/video file
-        model_name: Whisper model name (tiny, base, small, medium, large, turbo)
-        language: Language code (auto-detect if None)
-        prompt: Initial prompt for context
-        on_progress: Optional callback(stage: str, message: str)
-    
-    Returns:
-        TranscriptResult with text, segments, and metadata
-    
-    Raises:
-        FileNotFoundError: If file doesn't exist
-        ValueError: If model is invalid
-    """
+    """Transcribe media with the selected engine and optional pyannote."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
-    
-    if model_name not in AVAILABLE_MODELS:
-        raise ValueError(f"Invalid model: {model_name}. Available: {list(AVAILABLE_MODELS.keys())}")
-    
-    model_path = AVAILABLE_MODELS[model_name]
-    device = "mlx"  # MLX always uses Apple Silicon GPU
-    
+    engine = engine.casefold()
+    if engine not in AVAILABLE_ENGINES:
+        raise ValueError(f"Invalid engine: {engine}. Available: {AVAILABLE_ENGINES}")
+    resolved_model = model_name or DEFAULT_MODELS[engine]
+
+    _validate_speaker_counts(num_speakers, min_speakers, max_speakers)
     if on_progress:
-        on_progress("device", "Using MLX (Apple Silicon)")
-    
-    # Transcribe with MLX Whisper
-    if on_progress:
-        on_progress("loading", f"Loading {model_name} model...")
-    
-    transcribe_options = {
-        "path_or_hf_repo": model_path,
-        "verbose": False,
-    }
-    if language:
-        transcribe_options["language"] = language
-    if prompt:
-        transcribe_options["initial_prompt"] = prompt
-    
-    if on_progress:
-        on_progress("loaded", f"Model {model_name} loaded")
+        on_progress("device", "Using the Apple Silicon MLX backend")
+        on_progress("loading", f"Loading {engine} model {resolved_model}...")
         on_progress("transcribing", "Transcribing...")
-    
-    result = mlx_whisper.transcribe(file_path, **transcribe_options)
-    
+
+    if engine == "qwen":
+        engine_output = _transcribe_qwen(
+            file_path,
+            model_name=resolved_model,
+            language=language,
+            context=prompt,
+            need_words=diarize or word_timestamps,
+        )
+    else:
+        engine_output = _transcribe_parakeet(
+            file_path,
+            model_name=resolved_model,
+            language=language,
+            context=prompt,
+        )
+
+    speaker_count = 0
+    used_diarization_model: str | None = None
+    segments = engine_output.segments
+    if diarize:
+        turns = diarize_file(
+            file_path,
+            model_name=diarization_model,
+            token=hf_token,
+            device=diarization_device,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            on_progress=on_progress,
+        )
+        if engine_output.words:
+            segments = assign_speakers_to_words(
+                engine_output.words, turns, speaker_names
+            )
+        else:
+            segments = _fallback_assign_segments(segments, turns, speaker_names)
+        segments = restore_segment_punctuation(segments, engine_output.text)
+        speaker_count = len({turn.speaker for turn in turns})
+        used_diarization_model = diarization_model
+
     if on_progress:
         on_progress("complete", "Transcription complete")
-    
-    # Parse segments
-    segments = [
-        TranscriptSegment(
-            start=seg["start"],
-            end=seg["end"],
-            text=seg["text"].strip(),
-        )
-        for seg in result.get("segments", [])
-    ]
-    
-    # Calculate duration
-    duration_min = segments[-1].end / 60 if segments else 0
-    
-    # Full text
-    full_text = result.get("text", "").strip()
-    
+
     return TranscriptResult(
-        text=full_text,
+        text=engine_output.text,
         segments=segments,
-        language=result.get("language", "unknown"),
-        duration_min=duration_min,
-        device=device,
-        model=model_name,
+        language=engine_output.language,
+        duration_min=engine_output.duration_min,
+        device=engine_output.device,
+        model=resolved_model,
+        engine=engine,
+        speaker_count=speaker_count,
+        diarization_model=used_diarization_model,
+        words=engine_output.words,
     )
 
 
@@ -143,30 +708,34 @@ def result_to_markdown(
 ) -> str:
     """Convert TranscriptResult to Markdown string."""
     if date_str is None:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-    
+        date_str = datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
+
     file_name = os.path.splitext(source_filename)[0]
-    
     lines = [
         "---",
         "type: transcript",
         f"date: {date_str}",
-        f"source: \"[[{source_filename}]]\"",
+        f'source: "[[{source_filename}]]"',
         f"duration: {result.duration_min:.1f} min",
         f"language: {result.language}",
         f"device: {result.device}",
+        f"engine: {result.engine}",
         f"model: {result.model}",
-        "---",
-        "",
-        f"# Transcript: {file_name}",
-        "",
     ]
-    
+    if result.diarization_model:
+        lines.extend(
+            [
+                f"speakers: {result.speaker_count}",
+                f"diarization_model: {result.diarization_model}",
+            ]
+        )
+    lines.extend(["---", "", f"# Transcript: {file_name}", ""])
+
     for segment in result.segments:
         timestamp = format_timestamp(segment.start)
-        lines.append(f"**[{timestamp}]** {segment.text}")
+        speaker = f" {segment.speaker}:" if segment.speaker else ""
+        lines.append(f"**[{timestamp}]{speaker}** {segment.text}")
         lines.append("")
-    
     return "\n".join(lines)
 
 
@@ -175,17 +744,7 @@ def save_transcript(
     source_path: str,
     output_path: str | None = None,
 ) -> str:
-    """
-    Save transcript to Markdown file.
-    
-    Args:
-        result: TranscriptResult to save
-        source_path: Original audio/video file path
-        output_path: Custom output path (auto-generate if None)
-    
-    Returns:
-        Path to saved file
-    """
+    """Save a transcript as Markdown and return the output path."""
     if output_path:
         output_file = output_path
         output_dir = os.path.dirname(os.path.abspath(output_file))
@@ -195,15 +754,13 @@ def save_transcript(
         file_dir = os.path.dirname(os.path.abspath(source_path))
         transcripts_dir = os.path.join(file_dir, "Transcripts")
         os.makedirs(transcripts_dir, exist_ok=True)
-        
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
         file_name = os.path.splitext(os.path.basename(source_path))[0]
-        output_file = os.path.join(transcripts_dir, f"{date_str} {file_name} Transcript.md")
-    
-    source_filename = os.path.basename(source_path)
-    markdown = result_to_markdown(result, source_filename)
-    
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(markdown)
-    
+        output_file = os.path.join(
+            transcripts_dir, f"{date_str} {file_name} Transcript.md"
+        )
+
+    markdown = result_to_markdown(result, os.path.basename(source_path))
+    with open(output_file, "w", encoding="utf-8") as file_handle:
+        file_handle.write(markdown)
     return output_file

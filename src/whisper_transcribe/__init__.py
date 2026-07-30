@@ -1,13 +1,43 @@
-"""Whisper Transcribe - Audio/video transcription using MLX Whisper (Apple Silicon optimized)."""
+"""Free Transcribe - local multi-engine audio/video transcription."""
 
-__version__ = "0.3.0"
+__version__ = "0.1.0"
 
 from .core import (
-    AVAILABLE_MODELS,
+    AVAILABLE_ENGINES,
+    DEFAULT_ENGINE,
+    DEFAULT_MODEL,
+    DEFAULT_MODELS,
     SUPPORTED_FORMATS,
+    DiarizationResult,
+    SpeakerTurn,
     TranscriptResult,
     TranscriptSegment,
-    transcribe_file,
-    save_transcript,
+    TranscriptWord,
+    assign_speakers_to_words,
+    diarize_file,
+    diarize_media,
+    restore_segment_punctuation,
     result_to_markdown,
+    save_transcript,
+    transcribe_file,
 )
+
+__all__ = [
+    "AVAILABLE_ENGINES",
+    "DEFAULT_ENGINE",
+    "DEFAULT_MODEL",
+    "DEFAULT_MODELS",
+    "SUPPORTED_FORMATS",
+    "DiarizationResult",
+    "SpeakerTurn",
+    "TranscriptResult",
+    "TranscriptSegment",
+    "TranscriptWord",
+    "assign_speakers_to_words",
+    "diarize_file",
+    "diarize_media",
+    "restore_segment_punctuation",
+    "result_to_markdown",
+    "save_transcript",
+    "transcribe_file",
+]
