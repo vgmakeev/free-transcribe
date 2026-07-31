@@ -15,15 +15,20 @@ free_transcribe · Python library/core
 The interfaces share models, caches, transcript logic, and versioned artifacts;
 none of them contains a second transcription implementation.
 
+The web and desktop interfaces expose two profiles everywhere they are
+supported: **Fast** uses Parakeet, while **Maximum quality** uses Qwen 1.7B.
+Both can add pyannote speaker labels. On Linux the same choices use native
+NVIDIA CUDA backends inside the container.
+
 ## Quick start
 
 ```bash
 # Recommended on Apple Silicon: fast text plus automatic speaker labels
-uvx --from "free-transcribe[parakeet,diarization] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+uvx --from "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git" \
   ft meeting.mp4 --speakers
 
 # Maximum terminology accuracy: Qwen3-ASR 1.7B plus speakers
-uvx --from "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+uvx --from "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git" \
   ft meeting.mp4 --engine qwen --speakers
 ```
 
@@ -41,7 +46,7 @@ brew install uv ffmpeg
 For repeated use:
 
 ```bash
-uv tool install "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git"
+uv tool install "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git"
 ft doctor
 ```
 
@@ -73,7 +78,7 @@ Quality or Fast, optionally enable speakers, and open the generated Markdown.
 The desktop app deliberately reuses the same `ft` backend and lazy model cache:
 
 ```bash
-uv tool install "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git"
+uv tool install "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git"
 cd apps/desktop
 npm ci
 npm run tauri dev
@@ -96,7 +101,7 @@ bounded in-process queue and receive a queue position; a full queue returns
 HTTP `429` with `Retry-After` instead of overcommitting GPU memory.
 
 ```bash
-uv tool install "free-transcribe[api,quality] @ git+https://github.com/vgmakeev/free-transcribe.git"
+uv tool install "free-transcribe[api,apple] @ git+https://github.com/vgmakeev/free-transcribe.git"
 
 # Local-only development server; web UI at / and OpenAPI at /docs
 ft serve
@@ -125,7 +130,7 @@ built-in single-process queue.
 
 ### Ubuntu + NVIDIA CUDA container
 
-The host needs a recent NVIDIA driver, Docker, Docker Compose, and NVIDIA
+The host needs a CUDA 13-capable NVIDIA driver, Docker, Docker Compose, and NVIDIA
 Container Toolkit. CUDA user-space libraries and Python 3.14 are included in
 the image; the model cache persists in a Docker volume.
 
@@ -155,8 +160,8 @@ ft meeting.mp4 -o transcript.md
 ft meeting.mp4 -o -                    # Markdown to stdout
 ```
 
-`--speakers` runs Qwen word alignment and pyannote. It is slower than plain
-text transcription because accurate speaker assignment needs word timestamps.
+`--speakers` runs pyannote after the selected ASR engine. Qwen additionally
+loads its ForcedAligner; Parakeet already supplies word timestamps.
 
 ## Agent pipeline
 
@@ -251,10 +256,10 @@ Cached models can run offline afterward.
 | Install | Includes |
 |---|---|
 | `free-transcribe` | zero-ML artifact CLI: merge, label, render, doctor |
-| `free-transcribe[qwen]` | Qwen text transcription |
-| `free-transcribe[quality]` | Qwen, ForcedAligner, and pyannote |
+| `free-transcribe[apple]` | both MLX engines and pyannote on Apple Silicon |
+| `free-transcribe[cuda]` | Qwen, NeMo Parakeet, and pyannote on Linux/CUDA |
+| `free-transcribe[windows]` | Qwen and pyannote on Windows/CUDA |
 | `free-transcribe[diarization]` | pyannote |
-| `free-transcribe[parakeet]` | fast Parakeet backend |
 | `free-transcribe[mcp]` | MCP server |
 | `free-transcribe[api]` | FastAPI/uvicorn HTTP server |
 
@@ -273,7 +278,7 @@ MCP is deliberately not part of the base installation:
       "command": "uvx",
       "args": [
         "--from",
-        "free-transcribe[mcp,quality] @ git+https://github.com/vgmakeev/free-transcribe.git",
+        "free-transcribe[mcp,apple] @ git+https://github.com/vgmakeev/free-transcribe.git",
         "free-transcribe-mcp"
       ],
       "env": {
@@ -324,7 +329,8 @@ uv cache prune
 - macOS Apple Silicon with MLX: verified
 - Windows/NVIDIA: official Qwen Transformers/CUDA adapter implemented; dependency
   resolution and Tauri compilation are tested, real GPU inference is not yet verified
-- Linux/NVIDIA: same official CUDA adapter is packaged, not yet verified
+- Linux/NVIDIA: Qwen and NVIDIA NeMo Parakeet CUDA adapters are packaged; real
+  GPU inference is not yet verified
 - CPU, ROCm, and other platforms: not production-supported yet
 
 The CLI and artifact contracts are platform-neutral. A platform is only marked

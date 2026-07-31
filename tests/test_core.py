@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from free_transcribe.core import (
@@ -15,6 +15,8 @@ from free_transcribe.core import (
     _EngineOutput,
     _normalized_audio_path,
     _pyannote_progress_hook,
+    _transcribe_parakeet,
+    _transcribe_parakeet_cuda,
     _transcribe_qwen,
     _transcribe_qwen_mlx,
     assign_speakers_to_words,
@@ -356,6 +358,117 @@ class TranscriptionPipelineTests(unittest.TestCase):
             DEFAULT_MODELS["parakeet"],
         )
         self.assertEqual(result.engine, "parakeet")
+
+    def test_parakeet_dispatches_to_mlx_on_apple_silicon(self):
+        expected = _EngineOutput("text", [], [], "ru", 0.0, "mlx")
+        with (
+            patch("free_transcribe.core._is_apple_silicon", return_value=True),
+            patch(
+                "free_transcribe.core._transcribe_parakeet_mlx",
+                return_value=expected,
+            ) as backend,
+        ):
+            result = _transcribe_parakeet(
+                "meeting.wav",
+                model_name="test/model",
+                language="ru",
+                context=None,
+            )
+
+        self.assertIs(result, expected)
+        backend.assert_called_once()
+
+    def test_parakeet_dispatches_to_cuda_off_apple_silicon(self):
+        expected = _EngineOutput("text", [], [], "ru", 0.0, "cuda")
+        with (
+            patch("free_transcribe.core._is_apple_silicon", return_value=False),
+            patch(
+                "free_transcribe.core._transcribe_parakeet_cuda",
+                return_value=expected,
+            ) as backend,
+        ):
+            result = _transcribe_parakeet(
+                "meeting.wav",
+                model_name="test/model",
+                language="ru",
+                context=None,
+            )
+
+        self.assertIs(result, expected)
+        backend.assert_called_once()
+
+    def test_cuda_parakeet_normalizes_nemo_timestamps(self):
+        class FakeModel:
+            def cuda(self):
+                return self
+
+            def eval(self):
+                return self
+
+            def transcribe(self, _paths, timestamps=False):
+                self.timestamps = timestamps
+                return [
+                    SimpleNamespace(
+                        text="Hello world",
+                        timestamp={
+                            "word": [
+                                {"start": 0.0, "end": 0.4, "word": "Hello"},
+                                {"start": 0.5, "end": 0.9, "word": "world"},
+                            ],
+                            "segment": [
+                                {
+                                    "start": 0.0,
+                                    "end": 0.9,
+                                    "segment": "Hello world",
+                                }
+                            ],
+                        },
+                    )
+                ]
+
+        model = FakeModel()
+        asr = ModuleType("nemo.collections.asr")
+        asr.models = SimpleNamespace(
+            ASRModel=SimpleNamespace(
+                from_pretrained=lambda **_options: model,
+            )
+        )
+        collections = ModuleType("nemo.collections")
+        collections.__path__ = []
+        collections.asr = asr
+        nemo = ModuleType("nemo")
+        nemo.__path__ = []
+        nemo.collections = collections
+        fake_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True))
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "nemo": nemo,
+                    "nemo.collections": collections,
+                    "nemo.collections.asr": asr,
+                    "torch": fake_torch,
+                },
+            ),
+            patch(
+                "free_transcribe.core._chunked_audio_paths",
+                return_value=nullcontext([("chunk.flac", 0.0)]),
+            ),
+            patch("free_transcribe.core._media_duration_seconds", return_value=1.0),
+        ):
+            result = _transcribe_parakeet_cuda(
+                "meeting.flac",
+                model_name="nvidia/test",
+                language="en",
+                context=None,
+            )
+
+        self.assertTrue(model.timestamps)
+        self.assertEqual(result.device, "cuda")
+        self.assertEqual(result.text, "Hello world")
+        self.assertEqual([word.text for word in result.words], ["Hello", "world"])
+        self.assertEqual(result.segments[0].text, "Hello world")
 
     def test_qwen_can_request_words_without_diarization(self):
         engine_output = _EngineOutput(

@@ -48,9 +48,10 @@ def _runtime_capabilities() -> dict[str, Any]:
     """Report lightweight backend readiness without loading model frameworks."""
     apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
     qwen_module = "mlx_qwen3_asr" if apple_silicon else "qwen_asr"
+    parakeet_module = "mlx_audio" if apple_silicon else "nemo"
     engines = {
         "qwen": _module_available(qwen_module),
-        "parakeet": apple_silicon and _module_available("mlx_audio"),
+        "parakeet": _module_available(parakeet_module),
     }
     return {
         "engines": engines,

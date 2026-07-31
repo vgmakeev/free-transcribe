@@ -8,19 +8,25 @@ requires-python = ">=3.14"
 dependencies = []
 
 [project.optional-dependencies]
-qwen = [
+apple = [
+    "httpx[socks]>=0.28,<1",
     "mlx-qwen3-asr>=0.3.5,<0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "qwen-asr>=0.0.6,<0.1; sys_platform == 'win32' or sys_platform == 'linux'",
-]
-parakeet = [
     "mlx-audio>=0.4.6,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
-diarization = [
     "pyannote.audio>=4.0,<5",
 ]
-quality = [
-    "mlx-qwen3-asr>=0.3.5,<0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "qwen-asr>=0.0.6,<0.1; sys_platform == 'win32' or sys_platform == 'linux'",
+cuda = [
+    "httpx[socks]>=0.28,<1",
+    "qwen-asr>=0.0.6,<0.1; sys_platform == 'linux'",
+    "nemo-toolkit[asr]>=2.7.3,<2.8; sys_platform == 'linux'",
+    "numba>=0.66,<0.67; sys_platform == 'linux'",
+    "pyannote.audio>=4.0,<5",
+]
+windows = [
+    "httpx[socks]>=0.28,<1",
+    "qwen-asr>=0.0.6,<0.1; sys_platform == 'win32'",
+    "pyannote.audio>=4.0,<5",
+]
+diarization = [
     "pyannote.audio>=4.0,<5",
 ]
 mcp = [
@@ -36,12 +42,16 @@ api = [
 [tool.uv]
 conflicts = [
     [
-        { extra = "qwen" },
-        { extra = "parakeet" },
+        { extra = "apple" },
+        { extra = "cuda" },
     ],
     [
-        { extra = "quality" },
-        { extra = "parakeet" },
+        { extra = "apple" },
+        { extra = "windows" },
+    ],
+    [
+        { extra = "cuda" },
+        { extra = "windows" },
     ],
 ]
 

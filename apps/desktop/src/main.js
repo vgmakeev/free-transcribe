@@ -11,12 +11,6 @@ const PROFILES = {
     size: "4.7 GB",
     note: "best accuracy",
   },
-  "qwen-compact": {
-    engine: "qwen",
-    model: "Qwen/Qwen3-ASR-0.6B",
-    size: "1.9 GB",
-    note: "smaller download",
-  },
   parakeet: {
     engine: "parakeet",
     model: null,

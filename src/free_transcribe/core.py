@@ -39,7 +39,11 @@ DEFAULT_ENGINE = (
 )
 DEFAULT_MODELS = {
     "qwen": "Qwen/Qwen3-ASR-1.7B",
-    "parakeet": "mlx-community/parakeet-tdt-0.6b-v3",
+    "parakeet": (
+        "mlx-community/parakeet-tdt-0.6b-v3"
+        if platform.system() == "Darwin" and platform.machine() == "arm64"
+        else "nvidia/parakeet-tdt-0.6b-v3"
+    ),
 }
 DEFAULT_MODEL = DEFAULT_MODELS[DEFAULT_ENGINE]
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
@@ -387,7 +391,7 @@ def _transcribe_qwen_mlx(
         from mlx_qwen3_asr import transcribe as qwen_transcribe
     except ImportError as exc:
         raise RuntimeError(
-            "Qwen support is not installed. Install the 'qwen' or 'quality' extra."
+            "Qwen support is not installed. Install the 'apple' profile."
         ) from exc
 
     def mlx_progress(payload: dict[str, Any]) -> None:
@@ -520,8 +524,7 @@ def _transcribe_qwen_torch(
         from qwen_asr import Qwen3ASRModel
     except ImportError as exc:
         raise RuntimeError(
-            "Qwen CUDA support is not installed. Install the 'qwen' or "
-            "'quality' extra."
+            "Qwen CUDA support is not installed. Install the 'cuda' profile."
         ) from exc
 
     if not torch.cuda.is_available():
@@ -619,7 +622,7 @@ def _transcribe_qwen(
     )
 
 
-def _transcribe_parakeet(
+def _transcribe_parakeet_mlx(
     file_path: str,
     *,
     model_name: str,
@@ -632,7 +635,7 @@ def _transcribe_parakeet(
         from mlx_audio.stt.utils import load
     except ImportError as exc:
         raise RuntimeError(
-            "Parakeet support is not installed. Install the 'parakeet' extra."
+            "Parakeet support is not installed. Install the 'apple' profile."
         ) from exc
 
     if context:
@@ -689,6 +692,155 @@ def _transcribe_parakeet(
         language=language or str(getattr(result, "language", "auto")),
         duration_min=duration / 60,
         device="mlx",
+    )
+
+
+@contextmanager
+def _chunked_audio_paths(file_path: str, chunk_duration: int = 300):
+    """Yield timestamped FLAC chunks for bounded long-form CUDA inference."""
+    duration = _media_duration_seconds(file_path)
+    if duration <= chunk_duration:
+        yield [(file_path, 0.0)]
+        return
+
+    with tempfile.TemporaryDirectory(prefix="free-transcribe-chunks-") as directory:
+        pattern = str(Path(directory) / "chunk-%04d.flac")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-i",
+                    file_path,
+                    "-map",
+                    "0:a:0",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-c:a",
+                    "flac",
+                    "-f",
+                    "segment",
+                    "-segment_time",
+                    str(chunk_duration),
+                    "-reset_timestamps",
+                    "1",
+                    "-y",
+                    pattern,
+                ],
+                check=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg is required for long-form transcription") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("Could not split long audio for transcription") from exc
+        paths = sorted(Path(directory).glob("chunk-*.flac"))
+        if not paths:
+            raise RuntimeError("ffmpeg produced no audio chunks")
+        yield [(str(path), index * float(chunk_duration)) for index, path in enumerate(paths)]
+
+
+def _transcribe_parakeet_cuda(
+    file_path: str,
+    *,
+    model_name: str,
+    language: str | None,
+    context: str | None,
+    on_progress: ProgressCallback | None = None,
+) -> _EngineOutput:
+    """NVIDIA NeMo Parakeet backend for Linux/CUDA."""
+    del context
+    try:
+        import nemo.collections.asr as nemo_asr
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "Parakeet CUDA support is not installed. Install the 'cuda' profile."
+        ) from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError("The Parakeet CUDA backend requires an NVIDIA GPU")
+
+    model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
+    model.cuda()
+    model.eval()
+    text_parts: list[str] = []
+    words: list[TranscriptWord] = []
+    segments: list[TranscriptSegment] = []
+    duration = _media_duration_seconds(file_path)
+
+    with _chunked_audio_paths(file_path) as chunks:
+        for index, (chunk_path, offset) in enumerate(chunks, 1):
+            hypotheses = model.transcribe([chunk_path], timestamps=True)
+            if not hypotheses:
+                continue
+            hypothesis = hypotheses[0]
+            text = str(getattr(hypothesis, "text", "")).strip()
+            if text:
+                text_parts.append(text)
+            timestamps = getattr(hypothesis, "timestamp", {}) or {}
+            chunk_words = _words_from_items(timestamps.get("word", []))
+            words.extend(
+                TranscriptWord(word.start + offset, word.end + offset, word.text)
+                for word in chunk_words
+            )
+            for item in timestamps.get("segment", []):
+                segment_text = str(
+                    item.get("segment", item.get("text", ""))
+                ).strip()
+                if segment_text:
+                    segments.append(
+                        TranscriptSegment(
+                            float(item.get("start", 0.0)) + offset,
+                            float(item.get("end", 0.0)) + offset,
+                            segment_text,
+                        )
+                    )
+            if on_progress is not None:
+                processed = min(offset + _media_duration_seconds(chunk_path), duration)
+                percent = round(processed / duration * 100) if duration else 100
+                on_progress(
+                    "transcribing",
+                    f"Transcribing… {percent}% · {format_timestamp(processed)} / "
+                    f"{format_timestamp(duration)} · chunk {index}/{len(chunks)}",
+                )
+
+    if not segments and words:
+        segments = [
+            TranscriptSegment(word.start, word.end, word.text.strip()) for word in words
+        ]
+    if not segments and text_parts:
+        segments = [TranscriptSegment(0.0, duration, " ".join(text_parts))]
+    return _EngineOutput(
+        text=" ".join(text_parts),
+        segments=segments,
+        words=words,
+        language=language or "auto",
+        duration_min=duration / 60,
+        device="cuda",
+    )
+
+
+def _transcribe_parakeet(
+    file_path: str,
+    *,
+    model_name: str,
+    language: str | None,
+    context: str | None,
+    on_progress: ProgressCallback | None = None,
+) -> _EngineOutput:
+    backend = (
+        _transcribe_parakeet_mlx
+        if _is_apple_silicon()
+        else _transcribe_parakeet_cuda
+    )
+    return backend(
+        file_path,
+        model_name=model_name,
+        language=language,
+        context=context,
+        on_progress=on_progress,
     )
 
 
@@ -773,9 +925,8 @@ def diarize_media(
         from pyannote.audio import Pipeline
     except ImportError as exc:
         raise RuntimeError(
-            "Speaker diarization is not installed. Install the optional dependencies "
-            "with: uv tool install 'free-transcribe[quality] @ "
-            "git+https://github.com/vgmakeev/free-transcribe.git'"
+            "Speaker diarization is not installed. Install the platform profile: "
+            "'apple', 'cuda', or 'windows'."
         ) from exc
 
     if on_progress:
@@ -948,6 +1099,13 @@ def _transcribe_prepared(
                 import mlx.core as mx
 
                 mx.clear_cache()
+            except ImportError:
+                pass
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             except ImportError:
                 pass
         turns = diarize_file(

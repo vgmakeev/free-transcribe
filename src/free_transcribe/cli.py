@@ -195,6 +195,8 @@ def _run_doctor(args: argparse.Namespace) -> None:
     apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
     mlx_qwen = importlib.util.find_spec("mlx_qwen3_asr") is not None
     qwen_torch = importlib.util.find_spec("qwen_asr") is not None
+    parakeet_mlx = importlib.util.find_spec("mlx_audio") is not None
+    parakeet_cuda = importlib.util.find_spec("nemo") is not None
     torch_installed = importlib.util.find_spec("torch") is not None
     cuda = False
     if torch_installed and not apple_silicon:
@@ -208,13 +210,16 @@ def _run_doctor(args: argparse.Namespace) -> None:
         "qwen": mlx_qwen or qwen_torch,
         "qwen_mlx": mlx_qwen,
         "qwen_transformers": qwen_torch,
-        "parakeet": importlib.util.find_spec("mlx_audio") is not None,
+        "parakeet": parakeet_mlx or parakeet_cuda,
+        "parakeet_mlx": parakeet_mlx,
+        "parakeet_cuda": parakeet_cuda,
         "diarization": importlib.util.find_spec("pyannote.audio") is not None,
         "mcp": importlib.util.find_spec("mcp") is not None,
         "api": importlib.util.find_spec("fastapi") is not None
         and importlib.util.find_spec("uvicorn") is not None,
     }
     qwen_ready = (apple_silicon and mlx_qwen) or (cuda and qwen_torch)
+    parakeet_ready = (apple_silicon and parakeet_mlx) or (cuda and parakeet_cuda)
     payload = {
         "schema": "free-transcribe/doctor/v1",
         "version": __version__,
@@ -232,11 +237,11 @@ def _run_doctor(args: argparse.Namespace) -> None:
         ),
         "ready": {
             "qwen": qwen_ready,
-            "parakeet": apple_silicon and capabilities["parakeet"],
+            "parakeet": parakeet_ready,
             "diarization": capabilities["diarization"],
             "word_alignment": qwen_ready,
             "speaker_transcription": capabilities["diarization"]
-            and (qwen_ready or (apple_silicon and capabilities["parakeet"])),
+            and (qwen_ready or parakeet_ready),
             "mcp": capabilities["mcp"],
             "api": capabilities["api"],
             "artifact_tools": True,

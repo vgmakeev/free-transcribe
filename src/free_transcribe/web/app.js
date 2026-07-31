@@ -32,12 +32,6 @@ const PROFILES = {
     note: "fastest on Apple Silicon",
   },
   quality: { engine: "qwen", model: "", size: "4.7 GB", note: "best accuracy" },
-  compact: {
-    engine: "qwen",
-    model: "Qwen/Qwen3-ASR-0.6B",
-    size: "1.9 GB",
-    note: "smaller download",
-  },
 };
 
 let media = null;
