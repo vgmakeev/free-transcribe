@@ -57,3 +57,5 @@ jobs:
         env:
           FT_API_TOKEN: ci-only-token
         run: docker compose -f compose.cuda.yaml config --quiet
+      - name: Check CUDA Dockerfile
+        run: docker build --check -f deploy/Dockerfile.cuda .
