@@ -195,7 +195,7 @@ async function transcribe() {
     if (match) {
       const [stage, message] = match.slice(1);
       elements.statusText.textContent = message;
-      if (["device", "loading"].includes(stage)) setStage("model");
+      if (["device", "preparing", "loading"].includes(stage)) setStage("model");
       if (stage === "transcribing") {
         setStage("transcription", ["model"]);
         const progress = message.match(/\b(\d{1,3}(?:\.\d+)?)%/);

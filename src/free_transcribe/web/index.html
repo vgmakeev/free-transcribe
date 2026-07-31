@@ -28,13 +28,14 @@
         <div class="options">
           <label>Profile
             <select id="profile">
+              <option value="parakeet">Fast quality · Parakeet</option>
               <option value="quality">Best quality · Qwen 1.7B</option>
               <option value="compact">Compact · Qwen 0.6B</option>
             </select>
           </label>
           <small id="profile-info"></small>
           <label class="switch">
-            <span>Identify speakers<small>Qwen aligner + pyannote</small></span>
+            <span>Identify speakers<small>pyannote, automatic count</small></span>
             <input id="speakers" type="checkbox" checked />
           </label>
           <label id="count-row" class="hidden">Exact speaker count

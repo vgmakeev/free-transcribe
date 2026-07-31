@@ -22,6 +22,9 @@ class ApiTests(unittest.TestCase):
             self.assertIn("Free Transcribe", response.text)
             self.assertIn("default-src 'self'", response.headers["content-security-policy"])
             self.assertEqual(client.get("/assets/app.js").status_code, 200)
+            health = client.get("/health").json()
+            self.assertEqual(set(health["ready"]["engines"]), {"qwen", "parakeet"})
+            self.assertIsInstance(health["ready"]["speakers"], bool)
 
     def test_authenticated_background_transcription(self):
         result = TranscriptResult(

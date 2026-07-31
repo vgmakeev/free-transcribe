@@ -28,7 +28,8 @@ uvx --from "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-tran
 ```
 
 Models are downloaded lazily from Hugging Face. They are not bundled with the
-package or repository.
+package or repository. For video input, `ffmpeg` first extracts one temporary
+mono 16 kHz FLAC; ASR and pyannote share it, and it is deleted after the job.
 
 Requirements: Python 3.14, `uv`, and `ffmpeg`. Apple Silicon is the verified
 inference platform; the Windows/NVIDIA adapter is experimental.
@@ -291,12 +292,15 @@ comparison because no human reference transcript was available.
 | Pipeline | Time | Peak memory | Outcome |
 |---|---:|---:|---|
 | Parakeet TDT 0.6B v3 | 5.7 s | 3.68 GB | Fastest, strong text |
+| Parakeet + pyannote | 50.2 s | 3.34 GB | Fast speakers, correctly found 3 |
 | Qwen3-ASR 1.7B | 179.7 s | 5.03 GB | Best domain text |
 | pyannote Community-1 | 25.6 s | 1.47 GB | Correctly found 3 speakers |
 
-The complete 54:56 test recording finished in 19:43 with Qwen, ForcedAligner,
-and pyannote, used about 5 GB peak RSS, found three speakers automatically, and
-reached the final utterance at 54:55.
+On the complete 54:56 recording, chunked Parakeet plus pyannote finished in
+3:22, used 3.45 GB peak RSS, and found three speakers automatically. Qwen plus
+ForcedAligner and pyannote took 19:43 and about 5 GB RSS, but produced the best
+domain terminology. The practical Apple Silicon default is Parakeet plus
+pyannote; use Qwen 1.7B when accuracy matters enough to accept the longer run.
 
 ## Model storage
 

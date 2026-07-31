@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import platform
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any
 
 SUPPORTED_FORMATS = {
@@ -26,6 +29,7 @@ SUPPORTED_FORMATS = {
     ".avi",
     ".mov",
 }
+VIDEO_FORMATS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
 
 AVAILABLE_ENGINES = ("qwen", "parakeet")
 DEFAULT_ENGINE = "qwen"
@@ -460,6 +464,42 @@ def _media_duration_seconds(file_path: str) -> float:
         return 0.0
 
 
+@contextmanager
+def _normalized_audio_path(file_path: str):
+    """Extract video audio once; leave native audio files unchanged."""
+    if Path(file_path).suffix.casefold() not in VIDEO_FORMATS:
+        yield file_path
+        return
+
+    with tempfile.TemporaryDirectory(prefix="free-transcribe-audio-") as directory:
+        audio_path = str(Path(directory) / "audio.flac")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-i",
+                    file_path,
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-c:a",
+                    "flac",
+                    "-y",
+                    audio_path,
+                ],
+                check=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg is required to process video files") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("Could not extract audio from media") from exc
+        yield audio_path
+
+
 def _transcribe_qwen_torch(
     file_path: str,
     *,
@@ -581,6 +621,7 @@ def _transcribe_parakeet(
     model_name: str,
     language: str | None,
     context: str | None,
+    on_progress: ProgressCallback | None = None,
 ) -> _EngineOutput:
     _require_apple_silicon("Parakeet")
     try:
@@ -594,7 +635,33 @@ def _transcribe_parakeet(
         # Parakeet does not currently expose contextual biasing in mlx-audio.
         context = None
     model = load(model_name)
-    result = model.generate(file_path)
+    previous_chunk_end = 0
+
+    def chunk_started(current_position: int, total_position: int) -> None:
+        nonlocal previous_chunk_end
+        if on_progress is not None and previous_chunk_end and total_position:
+            fraction = min(previous_chunk_end / total_position, 1.0)
+            on_progress(
+                "transcribing",
+                f"Transcribing… {int(fraction * 100)}% · "
+                f"{format_timestamp(previous_chunk_end / 16000)} / "
+                f"{format_timestamp(total_position / 16000)}",
+            )
+        previous_chunk_end = current_position
+
+    result = model.generate(
+        file_path,
+        chunk_duration=300.0,
+        overlap_duration=2.0,
+        chunk_callback=chunk_started,
+    )
+    if on_progress is not None:
+        duration = _media_duration_seconds(file_path)
+        on_progress(
+            "transcribing",
+            f"Transcribing… 100% · {format_timestamp(duration)} / "
+            f"{format_timestamp(duration)}",
+        )
     sentences = list(getattr(result, "sentences", []) or [])
     segments = [
         TranscriptSegment(
@@ -713,19 +780,20 @@ def diarize_media(
             "diarizing", f"Identifying speakers on {resolved_device.upper()}..."
         )
 
-    try:
-        output = pipeline(file_path, **diarization_options)
-    except RuntimeError:
-        if device != "auto" or resolved_device == "cpu":
-            raise
-        if on_progress:
-            on_progress(
-                "diarizing",
-                f"{resolved_device.upper()} diarization failed; retrying on CPU...",
-            )
-        pipeline.to(torch.device("cpu"))
-        resolved_device = "cpu"
-        output = pipeline(file_path, **diarization_options)
+    with _normalized_audio_path(file_path) as diarization_path:
+        try:
+            output = pipeline(diarization_path, **diarization_options)
+        except RuntimeError:
+            if device != "auto" or resolved_device == "cpu":
+                raise
+            if on_progress:
+                on_progress(
+                    "diarizing",
+                    f"{resolved_device.upper()} diarization failed; retrying on CPU...",
+                )
+            pipeline.to(torch.device("cpu"))
+            resolved_device = "cpu"
+            output = pipeline(diarization_path, **diarization_options)
 
     annotation = getattr(output, "speaker_diarization", output)
     turns = [
@@ -775,39 +843,25 @@ def diarize_file(
     return result.exclusive_turns
 
 
-def transcribe_file(
+def _transcribe_prepared(
     file_path: str,
-    model_name: str | None = None,
-    language: str | None = None,
-    prompt: str | None = None,
-    on_progress: ProgressCallback | None = None,
     *,
-    engine: str = DEFAULT_ENGINE,
-    diarize: bool = False,
-    diarization_model: str = DEFAULT_DIARIZATION_MODEL,
-    diarization_device: str = "auto",
-    hf_token: str | None = None,
-    num_speakers: int | None = None,
-    min_speakers: int | None = None,
-    max_speakers: int | None = None,
-    speaker_names: list[str] | None = None,
-    word_timestamps: bool = False,
+    resolved_model: str,
+    language: str | None,
+    prompt: str | None,
+    on_progress: ProgressCallback | None,
+    engine: str,
+    diarize: bool,
+    diarization_model: str,
+    diarization_device: str,
+    hf_token: str | None,
+    num_speakers: int | None,
+    min_speakers: int | None,
+    max_speakers: int | None,
+    speaker_names: list[str] | None,
+    word_timestamps: bool,
 ) -> TranscriptResult:
-    """Transcribe media with the selected engine and optional pyannote."""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-    engine = engine.casefold()
-    if engine not in AVAILABLE_ENGINES:
-        raise ValueError(f"Invalid engine: {engine}. Available: {AVAILABLE_ENGINES}")
-    resolved_model = model_name or DEFAULT_MODELS[engine]
-
-    _validate_speaker_counts(num_speakers, min_speakers, max_speakers)
-    if on_progress:
-        backend = "Apple Silicon MLX" if _is_apple_silicon() else "NVIDIA CUDA"
-        on_progress("device", f"Using the {backend} backend")
-        on_progress("loading", f"Loading {engine} model {resolved_model}...")
-        on_progress("transcribing", "Transcribing...")
-
+    """Run model stages on already normalized audio."""
     if engine == "qwen":
         engine_output = _transcribe_qwen(
             file_path,
@@ -823,12 +877,23 @@ def transcribe_file(
             model_name=resolved_model,
             language=language,
             context=prompt,
+            on_progress=on_progress,
         )
 
     speaker_count = 0
     used_diarization_model: str | None = None
     segments = engine_output.segments
     if diarize:
+        if engine == "parakeet":
+            # The ASR model is no longer needed. Release Metal allocations
+            # before loading pyannote so peak memory is bounded by one model.
+            gc.collect()
+            try:
+                import mlx.core as mx
+
+                mx.clear_cache()
+            except ImportError:
+                pass
         turns = diarize_file(
             file_path,
             model_name=diarization_model,
@@ -864,6 +929,62 @@ def transcribe_file(
         diarization_model=used_diarization_model,
         words=engine_output.words,
     )
+
+
+def transcribe_file(
+    file_path: str,
+    model_name: str | None = None,
+    language: str | None = None,
+    prompt: str | None = None,
+    on_progress: ProgressCallback | None = None,
+    *,
+    engine: str = DEFAULT_ENGINE,
+    diarize: bool = False,
+    diarization_model: str = DEFAULT_DIARIZATION_MODEL,
+    diarization_device: str = "auto",
+    hf_token: str | None = None,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    speaker_names: list[str] | None = None,
+    word_timestamps: bool = False,
+) -> TranscriptResult:
+    """Transcribe media with the selected engine and optional pyannote."""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+    engine = engine.casefold()
+    if engine not in AVAILABLE_ENGINES:
+        raise ValueError(f"Invalid engine: {engine}. Available: {AVAILABLE_ENGINES}")
+    resolved_model = model_name or DEFAULT_MODELS[engine]
+
+    _validate_speaker_counts(num_speakers, min_speakers, max_speakers)
+    if on_progress:
+        backend = "Apple Silicon MLX" if _is_apple_silicon() else "NVIDIA CUDA"
+        on_progress("device", f"Using the {backend} backend")
+        if Path(file_path).suffix.casefold() in VIDEO_FORMATS:
+            on_progress("preparing", "Extracting mono audio with ffmpeg...")
+
+    with _normalized_audio_path(file_path) as prepared_path:
+        if on_progress:
+            on_progress("loading", f"Loading {engine} model {resolved_model}...")
+            on_progress("transcribing", "Transcribing...")
+        return _transcribe_prepared(
+            prepared_path,
+            resolved_model=resolved_model,
+            language=language,
+            prompt=prompt,
+            on_progress=on_progress,
+            engine=engine,
+            diarize=diarize,
+            diarization_model=diarization_model,
+            diarization_device=diarization_device,
+            hf_token=hf_token,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            speaker_names=speaker_names,
+            word_timestamps=word_timestamps,
+        )
 
 
 def result_to_markdown(

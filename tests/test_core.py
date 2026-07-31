@@ -1,5 +1,8 @@
+import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,6 +13,7 @@ from free_transcribe.core import (
     TranscriptSegment,
     TranscriptWord,
     _EngineOutput,
+    _normalized_audio_path,
     _transcribe_qwen,
     _transcribe_qwen_mlx,
     assign_speakers_to_words,
@@ -141,6 +145,49 @@ class MarkdownTests(unittest.TestCase):
 
 
 class TranscriptionPipelineTests(unittest.TestCase):
+    def test_video_audio_is_extracted_as_mono_16khz_flac(self):
+        with (
+            patch("free_transcribe.core.subprocess.run") as run,
+            _normalized_audio_path("meeting.webm") as audio_path,
+        ):
+            self.assertEqual(Path(audio_path).suffix, ".flac")
+            command = run.call_args.args[0]
+            self.assertIn("-vn", command)
+            self.assertEqual(command[command.index("-ac") + 1], "1")
+            self.assertEqual(command[command.index("-ar") + 1], "16000")
+
+        self.assertFalse(Path(audio_path).exists())
+
+    def test_prepared_audio_is_shared_by_asr_and_diarization(self):
+        engine_output = _EngineOutput(
+            text="Hello",
+            segments=[TranscriptSegment(0.0, 0.5, "Hello")],
+            words=[TranscriptWord(0.0, 0.5, "Hello")],
+            language="English",
+            duration_min=0.5 / 60,
+            device="mlx",
+        )
+        turns = [SpeakerTurn(0.0, 0.5, "A")]
+
+        with (
+            tempfile.NamedTemporaryFile(suffix=".webm") as media_file,
+            patch(
+                "free_transcribe.core._normalized_audio_path",
+                return_value=nullcontext("prepared.flac"),
+            ),
+            patch(
+                "free_transcribe.core._transcribe_parakeet",
+                return_value=engine_output,
+            ) as parakeet_transcribe,
+            patch(
+                "free_transcribe.core.diarize_file", return_value=turns
+            ) as diarize,
+        ):
+            transcribe_file(media_file.name, engine="parakeet", diarize=True)
+
+        self.assertEqual(parakeet_transcribe.call_args.args[0], "prepared.flac")
+        self.assertEqual(diarize.call_args.args[0], "prepared.flac")
+
     def test_mlx_reports_real_processed_audio_progress(self):
         events = []
 
@@ -172,7 +219,10 @@ class TranscriptionPipelineTests(unittest.TestCase):
 
         with (
             patch("free_transcribe.core._is_apple_silicon", return_value=True),
-            patch("mlx_qwen3_asr.transcribe", side_effect=fake_transcribe),
+            patch.dict(
+                sys.modules,
+                {"mlx_qwen3_asr": SimpleNamespace(transcribe=fake_transcribe)},
+            ),
         ):
             _transcribe_qwen_mlx(
                 "meeting.wav",

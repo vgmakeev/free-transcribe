@@ -2,8 +2,10 @@
 
 import asyncio
 import hmac
+import importlib.util
 import json
 import os
+import platform
 import re
 import shutil
 import tempfile
@@ -33,6 +35,27 @@ WEB_ROOT = Path(__file__).with_name("web")
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
+
+
+def _runtime_capabilities() -> dict[str, Any]:
+    """Report lightweight backend readiness without loading model frameworks."""
+    apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
+    qwen_module = "mlx_qwen3_asr" if apple_silicon else "qwen_asr"
+    engines = {
+        "qwen": _module_available(qwen_module),
+        "parakeet": apple_silicon and _module_available("mlx_audio"),
+    }
+    return {
+        "engines": engines,
+        "speakers": _module_available("pyannote.audio"),
+    }
 
 
 @dataclass
@@ -268,6 +291,7 @@ def create_app(
             "authentication": bool(configured_token),
             "concurrency": worker_count,
             "cuda_required": cuda_required,
+            "ready": _runtime_capabilities(),
             "queue": {
                 "queued": queued,
                 "running": running,

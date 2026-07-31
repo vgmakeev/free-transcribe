@@ -25,8 +25,15 @@ const elements = {
 };
 
 const PROFILES = {
-  quality: { model: "", size: "4.7 GB", note: "best accuracy" },
+  parakeet: {
+    engine: "parakeet",
+    model: "",
+    size: "2.3 GB",
+    note: "fastest on Apple Silicon",
+  },
+  quality: { engine: "qwen", model: "", size: "4.7 GB", note: "best accuracy" },
   compact: {
+    engine: "qwen",
     model: "Qwen/Qwen3-ASR-0.6B",
     size: "1.9 GB",
     note: "smaller download",
@@ -35,6 +42,7 @@ const PROFILES = {
 
 let media = null;
 let running = false;
+let readyEngines = new Set();
 
 elements.token.value = sessionStorage.getItem("free-transcribe-token") ?? "";
 
@@ -47,7 +55,7 @@ function setMedia(file) {
   media = file;
   elements.fileLabel.textContent = `${file.name} · ${formatBytes(file.size)}`;
   elements.drop.classList.add("selected");
-  elements.start.disabled = running;
+  elements.start.disabled = running || !readyEngines.has(PROFILES[elements.profile.value].engine);
 }
 
 function formatBytes(bytes) {
@@ -57,9 +65,12 @@ function formatBytes(bytes) {
 
 function refreshProfile() {
   const profile = PROFILES[elements.profile.value];
-  const aligner = elements.speakers.checked ? " · +1.8 GB speaker aligner" : "";
+  const aligner = elements.speakers.checked && profile.engine === "qwen"
+    ? " · +1.8 GB word aligner"
+    : "";
   elements.profileInfo.textContent = `First use: ~${profile.size}${aligner} · ${profile.note}. Cached afterward.`;
   elements.countRow.classList.toggle("hidden", !elements.speakers.checked);
+  elements.start.disabled = running || !media || !readyEngines.has(profile.engine);
 }
 
 function setStage(active, completed = []) {
@@ -127,7 +138,7 @@ function renderJob(job) {
       });
     } else if (job.status === "running") {
       const stage = job.progress.stage;
-      if (["device", "loading"].includes(stage)) {
+      if (["device", "preparing", "loading"].includes(stage)) {
         setProgress(job.progress.message, { stage: "model", completed: ["upload"] });
       } else if (stage === "transcribing") {
         setProgress(job.progress.message, {
@@ -188,7 +199,7 @@ async function transcribe() {
   const profile = PROFILES[elements.profile.value];
   const form = new FormData();
   form.append("file", media);
-  form.append("engine", "qwen");
+  form.append("engine", profile.engine);
   if (profile.model) form.append("model", profile.model);
   form.append("speakers", String(elements.speakers.checked));
   const speakerCount = elements.speakerCount.value.trim();
@@ -223,8 +234,25 @@ async function checkHealth() {
     const response = await fetch("/health");
     if (!response.ok) throw new Error();
     const health = await response.json();
+    readyEngines = new Set(
+      Object.entries(health.ready.engines)
+        .filter(([, ready]) => ready)
+        .map(([engine]) => engine),
+    );
+    for (const option of elements.profile.options) {
+      const ready = readyEngines.has(PROFILES[option.value].engine);
+      option.disabled = !ready;
+      option.hidden = !ready;
+    }
+    if (!readyEngines.has(PROFILES[elements.profile.value].engine)) {
+      const fallback = [...elements.profile.options].find((option) => !option.disabled);
+      if (fallback) elements.profile.value = fallback.value;
+    }
+    elements.speakers.disabled = !health.ready.speakers;
+    if (!health.ready.speakers) elements.speakers.checked = false;
     elements.runtime.textContent = `Server ${health.version} · ${health.cuda_required ? "CUDA GPU" : "local"} · ${health.queue.running} running, ${health.queue.queued} queued`;
     elements.authRow.classList.toggle("hidden", !health.authentication);
+    refreshProfile();
   } catch {
     elements.runtime.textContent = "Server unavailable";
   }
