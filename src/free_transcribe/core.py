@@ -32,7 +32,11 @@ SUPPORTED_FORMATS = {
 VIDEO_FORMATS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
 
 AVAILABLE_ENGINES = ("qwen", "parakeet")
-DEFAULT_ENGINE = "qwen"
+DEFAULT_ENGINE = (
+    "parakeet"
+    if platform.system() == "Darwin" and platform.machine() == "arm64"
+    else "qwen"
+)
 DEFAULT_MODELS = {
     "qwen": "Qwen/Qwen3-ASR-1.7B",
     "parakeet": "mlx-community/parakeet-tdt-0.6b-v3",

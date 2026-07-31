@@ -302,6 +302,7 @@ class TranscriptionPipelineTests(unittest.TestCase):
         ):
             result = transcribe_file(
                 media_file.name,
+                engine="qwen",
                 language="en",
                 diarize=True,
                 speaker_names=["Alice", "Bob"],
@@ -356,7 +357,9 @@ class TranscriptionPipelineTests(unittest.TestCase):
                 return_value=engine_output,
             ) as qwen_transcribe,
         ):
-            result = transcribe_file(media_file.name, word_timestamps=True)
+            result = transcribe_file(
+                media_file.name, engine="qwen", word_timestamps=True
+            )
 
         self.assertTrue(qwen_transcribe.call_args.kwargs["need_words"])
         self.assertEqual(result.words, engine_output.words)

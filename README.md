@@ -18,13 +18,13 @@ none of them contains a second transcription implementation.
 ## Quick start
 
 ```bash
-# Text only: Qwen3-ASR 1.7B
-uvx --from "free-transcribe[qwen] @ git+https://github.com/vgmakeev/free-transcribe.git" \
-  ft meeting.mp4
-
-# Text plus automatic speaker labels
-uvx --from "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+# Recommended on Apple Silicon: fast text plus automatic speaker labels
+uvx --from "free-transcribe[parakeet,diarization] @ git+https://github.com/vgmakeev/free-transcribe.git" \
   ft meeting.mp4 --speakers
+
+# Maximum terminology accuracy: Qwen3-ASR 1.7B plus speakers
+uvx --from "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+  ft meeting.mp4 --engine qwen --speakers
 ```
 
 Models are downloaded lazily from Hugging Face. They are not bundled with the
@@ -145,7 +145,7 @@ work. Put TLS/auth rate limiting in a reverse proxy before exposing it publicly.
 ## CLI
 
 ```bash
-ft meeting.mp4                         # Qwen, Markdown
+ft meeting.mp4                         # Parakeet on Apple Silicon; Qwen elsewhere
 ft meeting.mp4 --speakers              # automatic speaker count
 ft meeting.mp4 --speakers 3            # exact speaker count
 ft meeting.mp4 --speakers --names "Anna,Victor,Igor"
