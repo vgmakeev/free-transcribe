@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -159,7 +159,9 @@ def create_app(
                 job.status = "succeeded"
                 job.stage = "complete"
                 job.message = "Transcription complete"
-            except Exception as exc:
+            # This is the boundary of a background job: model/framework errors
+            # must become observable job failures instead of orphaned tasks.
+            except Exception as exc:  # noqa: BLE001
                 job.status = "failed"
                 job.stage = "failed"
                 job.message = "Transcription failed"
@@ -183,12 +185,12 @@ def create_app(
         dependencies=[Depends(authorize)],
     )
     async def submit(
-        file: UploadFile = File(...),
-        engine: str = Form(DEFAULT_ENGINE),
-        language: str | None = Form(None),
-        prompt: str | None = Form(None),
-        speakers: bool = Form(False),
-        speaker_count: int | None = Form(None),
+        file: Annotated[UploadFile, File()],
+        engine: Annotated[str, Form()] = DEFAULT_ENGINE,
+        language: Annotated[str | None, Form()] = None,
+        prompt: Annotated[str | None, Form()] = None,
+        speakers: Annotated[bool, Form()] = False,
+        speaker_count: Annotated[int | None, Form()] = None,
     ) -> dict[str, Any]:
         engine = engine.casefold()
         if engine not in AVAILABLE_ENGINES:
