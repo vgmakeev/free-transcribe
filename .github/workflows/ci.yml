@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.14"
+      - run: uvx ruff check src tests
+      - run: uv run --extra api --with httpx2 python -m unittest discover -s tests -v
+      - run: uv build
+      - name: Resolve Windows quality profile
+        run: >-
+          uv pip compile pyproject.toml --extra quality --extra api
+          --python-platform windows --python-version 3.14
+          --output-file /tmp/free-transcribe-windows.txt
+      - name: Resolve Linux quality profile
+        run: >-
+          uv pip compile pyproject.toml --extra quality --extra api
+          --python-platform linux --python-version 3.14
+          --output-file /tmp/free-transcribe-linux.txt
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build
+      - run: cargo check --manifest-path src-tauri/Cargo.toml

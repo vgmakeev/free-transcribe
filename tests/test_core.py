@@ -2,13 +2,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from whisper_transcribe.core import (
+from free_transcribe.core import (
     DEFAULT_MODELS,
     SpeakerTurn,
     TranscriptResult,
     TranscriptSegment,
     TranscriptWord,
     _EngineOutput,
+    _transcribe_qwen,
     assign_speakers_to_words,
     format_timestamp,
     restore_segment_punctuation,
@@ -18,7 +19,7 @@ from whisper_transcribe.core import (
 
 
 class SpeakerAssignmentTests(unittest.TestCase):
-    def test_splits_one_whisper_segment_at_speaker_change(self):
+    def test_splits_one_asr_segment_at_speaker_change(self):
         words = [
             TranscriptWord(0.0, 0.4, " Hello"),
             TranscriptWord(0.4, 0.9, " there."),
@@ -138,6 +139,44 @@ class MarkdownTests(unittest.TestCase):
 
 
 class TranscriptionPipelineTests(unittest.TestCase):
+    def test_qwen_dispatches_to_mlx_on_apple_silicon(self):
+        expected = _EngineOutput("text", [], [], "ru", 0.0, "mlx")
+        with (
+            patch("free_transcribe.core._is_apple_silicon", return_value=True),
+            patch(
+                "free_transcribe.core._transcribe_qwen_mlx", return_value=expected
+            ) as backend,
+        ):
+            result = _transcribe_qwen(
+                "meeting.wav",
+                model_name="test/model",
+                language="ru",
+                context=None,
+                need_words=True,
+            )
+
+        self.assertIs(result, expected)
+        self.assertTrue(backend.call_args.kwargs["need_words"])
+
+    def test_qwen_dispatches_to_torch_off_apple_silicon(self):
+        expected = _EngineOutput("text", [], [], "ru", 0.0, "cuda")
+        with (
+            patch("free_transcribe.core._is_apple_silicon", return_value=False),
+            patch(
+                "free_transcribe.core._transcribe_qwen_torch", return_value=expected
+            ) as backend,
+        ):
+            result = _transcribe_qwen(
+                "meeting.wav",
+                model_name="test/model",
+                language="ru",
+                context=None,
+                need_words=False,
+            )
+
+        self.assertIs(result, expected)
+        backend.assert_called_once()
+
     def test_qwen_requests_alignment_and_assigns_speakers(self):
         engine_output = _EngineOutput(
             text="Hello Hi",
@@ -158,10 +197,10 @@ class TranscriptionPipelineTests(unittest.TestCase):
         with (
             tempfile.NamedTemporaryFile() as media_file,
             patch(
-                "whisper_transcribe.core._transcribe_qwen",
+                "free_transcribe.core._transcribe_qwen",
                 return_value=engine_output,
             ) as qwen_transcribe,
-            patch("whisper_transcribe.core.diarize_file", return_value=turns),
+            patch("free_transcribe.core.diarize_file", return_value=turns),
         ):
             result = transcribe_file(
                 media_file.name,
@@ -191,7 +230,7 @@ class TranscriptionPipelineTests(unittest.TestCase):
         with (
             tempfile.NamedTemporaryFile() as media_file,
             patch(
-                "whisper_transcribe.core._transcribe_parakeet",
+                "free_transcribe.core._transcribe_parakeet",
                 return_value=engine_output,
             ) as parakeet_transcribe,
         ):
@@ -215,7 +254,7 @@ class TranscriptionPipelineTests(unittest.TestCase):
         with (
             tempfile.NamedTemporaryFile() as media_file,
             patch(
-                "whisper_transcribe.core._transcribe_qwen",
+                "free_transcribe.core._transcribe_qwen",
                 return_value=engine_output,
             ) as qwen_transcribe,
         ):

@@ -1,0 +1,301 @@
+"""Optional HTTP API over the same local transcription core."""
+
+import asyncio
+import hmac
+import os
+import shutil
+import tempfile
+import uuid
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+
+from . import __version__
+from .core import (
+    AVAILABLE_ENGINES,
+    DEFAULT_ENGINE,
+    SUPPORTED_FORMATS,
+    save_transcript,
+    transcribe_file,
+)
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+@dataclass
+class _Job:
+    id: str
+    work_dir: Path
+    source_path: Path
+    status: str = "queued"
+    stage: str = "queued"
+    message: str = "Waiting for an inference slot"
+    created_at: str = ""
+    started_at: str | None = None
+    completed_at: str | None = None
+    result_path: Path | None = None
+    error: str | None = None
+
+    def public(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "status": self.status,
+            "progress": {"stage": self.stage, "message": self.message},
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+        }
+        if self.status == "succeeded":
+            payload["result_url"] = f"/v1/transcriptions/{self.id}/result"
+        if self.error:
+            payload["error"] = self.error
+        return payload
+
+
+def _bearer_token(request: Request) -> str:
+    scheme, _, value = request.headers.get("authorization", "").partition(" ")
+    return value if scheme.casefold() == "bearer" else ""
+
+
+def create_app(
+    *,
+    token: str | None = None,
+    concurrency: int | None = None,
+    max_upload_mb: int | None = None,
+) -> FastAPI:
+    """Create a self-contained API app; model dependencies remain lazy."""
+    configured_token = token if token is not None else os.getenv("FT_API_TOKEN", "")
+    worker_count = (
+        concurrency
+        if concurrency is not None
+        else int(os.getenv("FT_API_CONCURRENCY", "1"))
+    )
+    upload_mb = (
+        max_upload_mb
+        if max_upload_mb is not None
+        else int(os.getenv("FT_MAX_UPLOAD_MB", "4096"))
+    )
+    upload_limit = upload_mb * 1024 * 1024
+    if worker_count < 1:
+        raise ValueError("API concurrency must be at least 1")
+    if upload_limit < 1:
+        raise ValueError("upload limit must be positive")
+
+    jobs: dict[str, _Job] = {}
+    tasks: dict[str, asyncio.Task[None]] = {}
+    inference_slots = asyncio.Semaphore(worker_count)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        for task in tasks.values():
+            task.cancel()
+        for job in jobs.values():
+            shutil.rmtree(job.work_dir, ignore_errors=True)
+
+    app = FastAPI(
+        title="Free Transcribe",
+        version=__version__,
+        docs_url="/docs",
+        redoc_url=None,
+        lifespan=lifespan,
+    )
+
+    async def authorize(request: Request) -> None:
+        if configured_token and not hmac.compare_digest(
+            _bearer_token(request), configured_token
+        ):
+            raise HTTPException(status_code=401, detail="Invalid bearer token")
+
+    def find_job(job_id: str) -> _Job:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Transcription not found")
+        return job
+
+    async def execute(
+        job: _Job,
+        *,
+        engine: str,
+        language: str | None,
+        prompt: str | None,
+        speakers: bool,
+        speaker_count: int | None,
+    ) -> None:
+        async with inference_slots:
+            job.status = "running"
+            job.started_at = _now()
+
+            def progress(stage: str, message: str) -> None:
+                job.stage = stage
+                job.message = message
+
+            try:
+                result = await asyncio.to_thread(
+                    transcribe_file,
+                    str(job.source_path),
+                    language=language,
+                    prompt=prompt,
+                    on_progress=progress,
+                    engine=engine,
+                    diarize=speakers,
+                    num_speakers=speaker_count,
+                )
+                result_path = job.work_dir / "transcript.md"
+                await asyncio.to_thread(
+                    save_transcript,
+                    result,
+                    str(job.source_path),
+                    str(result_path),
+                )
+                job.result_path = result_path
+                job.status = "succeeded"
+                job.stage = "complete"
+                job.message = "Transcription complete"
+            except Exception as exc:
+                job.status = "failed"
+                job.stage = "failed"
+                job.message = "Transcription failed"
+                job.error = str(exc)
+            finally:
+                job.completed_at = _now()
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "service": "free-transcribe",
+            "version": __version__,
+            "authentication": bool(configured_token),
+            "concurrency": worker_count,
+        }
+
+    @app.post(
+        "/v1/transcriptions",
+        status_code=202,
+        dependencies=[Depends(authorize)],
+    )
+    async def submit(
+        file: UploadFile = File(...),
+        engine: str = Form(DEFAULT_ENGINE),
+        language: str | None = Form(None),
+        prompt: str | None = Form(None),
+        speakers: bool = Form(False),
+        speaker_count: int | None = Form(None),
+    ) -> dict[str, Any]:
+        engine = engine.casefold()
+        if engine not in AVAILABLE_ENGINES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"engine must be one of: {', '.join(AVAILABLE_ENGINES)}",
+            )
+        if speaker_count is not None and speaker_count < 1:
+            raise HTTPException(status_code=422, detail="speaker_count must be positive")
+
+        suffix = Path(file.filename or "").suffix.casefold()
+        if suffix not in SUPPORTED_FORMATS:
+            raise HTTPException(status_code=415, detail="Unsupported media format")
+
+        job_id = uuid.uuid4().hex
+        work_dir = Path(tempfile.mkdtemp(prefix=f"free-transcribe-{job_id}-"))
+        source_path = work_dir / f"source{suffix}"
+        size = 0
+        try:
+            with source_path.open("wb") as output:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > upload_limit:
+                        raise HTTPException(status_code=413, detail="Upload is too large")
+                    output.write(chunk)
+        except Exception:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise
+        finally:
+            await file.close()
+        if size == 0:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise HTTPException(status_code=422, detail="Upload is empty")
+
+        job = _Job(
+            id=job_id,
+            work_dir=work_dir,
+            source_path=source_path,
+            created_at=_now(),
+        )
+        jobs[job_id] = job
+        task = asyncio.create_task(
+            execute(
+                job,
+                engine=engine,
+                language=language,
+                prompt=prompt,
+                speakers=speakers or speaker_count is not None,
+                speaker_count=speaker_count,
+            )
+        )
+        tasks[job_id] = task
+        task.add_done_callback(lambda _task: tasks.pop(job_id, None))
+        return job.public()
+
+    @app.get("/v1/transcriptions/{job_id}", dependencies=[Depends(authorize)])
+    async def status(job_id: str) -> dict[str, Any]:
+        return find_job(job_id).public()
+
+    @app.get(
+        "/v1/transcriptions/{job_id}/result",
+        response_class=FileResponse,
+        dependencies=[Depends(authorize)],
+    )
+    async def result(job_id: str) -> FileResponse:
+        job = find_job(job_id)
+        if job.status != "succeeded" or job.result_path is None:
+            raise HTTPException(status_code=409, detail=f"Job is {job.status}")
+        return FileResponse(
+            job.result_path,
+            media_type="text/markdown; charset=utf-8",
+            filename="transcript.md",
+        )
+
+    @app.delete(
+        "/v1/transcriptions/{job_id}",
+        status_code=204,
+        dependencies=[Depends(authorize)],
+    )
+    async def delete(job_id: str) -> None:
+        job = find_job(job_id)
+        if job.status in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail=f"Job is {job.status}")
+        jobs.pop(job_id)
+        shutil.rmtree(job.work_dir, ignore_errors=True)
+
+    return app
+
+
+def run(*, host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Run the HTTP API with uvicorn."""
+    if host not in {"127.0.0.1", "localhost", "::1"} and not os.getenv(
+        "FT_API_TOKEN"
+    ):
+        raise RuntimeError(
+            "FT_API_TOKEN is required when binding the API beyond localhost"
+        )
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise RuntimeError("Install the 'api' extra to run the HTTP server") from exc
+    uvicorn.run(create_app(), host=host, port=port)
+
+
+def main() -> None:
+    """Standalone `free-transcribe-api` entry point."""
+    run(
+        host=os.getenv("FT_API_HOST", "127.0.0.1"),
+        port=int(os.getenv("FT_API_PORT", "8000")),
+    )

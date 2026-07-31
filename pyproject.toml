@@ -1,27 +1,48 @@
 [project]
 name = "free-transcribe"
-version = "0.1.0"
+version = "0.2.0"
 description = "Accurate local transcription with Qwen, Parakeet, and pyannote diarization."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.14"
-dependencies = [
-    "mlx-qwen3-asr>=0.3.5,<0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "rich",
-    "mcp>=1.29,<2",
-    "httpx[socks]>=0.28,<1",
-]
+dependencies = []
 
 [project.optional-dependencies]
+qwen = [
+    "mlx-qwen3-asr>=0.3.5,<0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "qwen-asr>=0.0.6,<0.1; sys_platform == 'win32' or sys_platform == 'linux'",
+]
 parakeet = [
     "mlx-audio>=0.4.6,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 diarization = [
     "pyannote.audio>=4.0,<5",
 ]
-all = [
-    "mlx-audio>=0.4.6,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+quality = [
+    "mlx-qwen3-asr>=0.3.5,<0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "qwen-asr>=0.0.6,<0.1; sys_platform == 'win32' or sys_platform == 'linux'",
     "pyannote.audio>=4.0,<5",
+]
+mcp = [
+    "mcp>=1.29,<2",
+    "httpx[socks]>=0.28,<1",
+]
+api = [
+    "fastapi>=0.116,<1",
+    "python-multipart>=0.0.20,<1",
+    "uvicorn>=0.35,<1",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "qwen" },
+        { extra = "parakeet" },
+    ],
+    [
+        { extra = "quality" },
+        { extra = "parakeet" },
+    ],
 ]
 
 [project.urls]
@@ -29,14 +50,14 @@ Repository = "https://github.com/vgmakeev/free-transcribe"
 Issues = "https://github.com/vgmakeev/free-transcribe/issues"
 
 [project.scripts]
-transcribe = "whisper_transcribe.cli:main"
-free-transcribe = "whisper_transcribe.agent_cli:main"
-transcribe-mcp = "whisper_transcribe.server:main"
-free-transcribe-mcp = "whisper_transcribe.server:main"
+ft = "free_transcribe.cli:main"
+free-transcribe = "free_transcribe.cli:main"
+free-transcribe-mcp = "free_transcribe.server:main"
+free-transcribe-api = "free_transcribe.api:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/whisper_transcribe"]
+packages = ["src/free_transcribe"]

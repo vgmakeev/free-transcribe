@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.ruff_cache/
 *.py[cod]
 *$py.class
 *.egg-info/
@@ -31,3 +32,11 @@ benchmark/results/
 
 # Local workspace metadata
 codedb.snapshot
+
+# Desktop build output
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/icons/android/
+apps/desktop/src-tauri/icons/ios/

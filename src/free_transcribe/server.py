@@ -1,6 +1,4 @@
-"""
-MCP server for local audio/video transcription.
-"""
+"""Optional MCP adapter for Free Transcribe."""
 
 import logging
 import os

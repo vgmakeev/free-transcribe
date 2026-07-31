@@ -1,205 +1,244 @@
 # Free Transcribe
 
-Local audio/video transcription with a quality-first Qwen backend, a fast
-Parakeet backend, and optional pyannote speaker diarization.
+Accurate local transcription with Qwen, optional pyannote speakers, and a fast
+Parakeet alternative. Optimized for Apple Silicon and designed to compose well
+from agents and shell scripts.
 
-The current production backend targets Apple Silicon through MLX. The public
-engine interface is platform-independent, but CUDA/CPU adapters are still
-experimental and must not be considered verified Windows/Linux support yet.
-
-## What to use
-
-| Profile | Pipeline | Use case |
-|---|---|---|
-| `qwen` (default) | Qwen3-ASR 1.7B | Best text quality |
-| `qwen --diarize` | Qwen + ForcedAligner + pyannote | Best text with speakers |
-| `parakeet` | Parakeet TDT 0.6B v3 | Very fast transcription |
-| `parakeet --diarize` | Parakeet + pyannote | Fast text with speakers |
-
-Models are downloaded lazily from Hugging Face and are not bundled in the
-Python package or Git repository.
-
-## Requirements
-
-- Apple Silicon Mac
-- Python 3.14
-- [uv](https://docs.astral.sh/uv/)
-- `ffmpeg` for video and compressed audio
-
-```bash
-brew install ffmpeg uv
+```text
+free_transcribe · Python library/core
+├── CLI adapter · ft
+├── HTTP adapter · FastAPI
+├── agent adapter · MCP + JSON artifacts
+└── desktop adapter · tiny Tauri app
 ```
 
-## Run with uvx
+The interfaces share models, caches, transcript logic, and versioned artifacts;
+none of them contains a second transcription implementation.
 
-Quality-first transcription:
-
-```bash
-uvx --from git+https://github.com/vgmakeev/free-transcribe.git \
-  transcribe meeting.webm --lang ru
-```
-
-Fast Parakeet transcription:
+## Quick start
 
 ```bash
-uvx --from "free-transcribe[parakeet] @ git+https://github.com/vgmakeev/free-transcribe.git" \
-  transcribe meeting.webm --engine parakeet --lang ru
+# Text only: Qwen3-ASR 1.7B
+uvx --from "free-transcribe[qwen] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+  ft meeting.mp4
+
+# Text plus automatic speaker labels
+uvx --from "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+  ft meeting.mp4 --speakers
 ```
 
-Qwen with speaker labels:
+Models are downloaded lazily from Hugging Face. They are not bundled with the
+package or repository.
+
+Requirements: Python 3.14, `uv`, and `ffmpeg`. Apple Silicon is the verified
+inference platform; the Windows/NVIDIA adapter is experimental.
 
 ```bash
-uvx --from "free-transcribe[diarization] @ git+https://github.com/vgmakeev/free-transcribe.git" \
-  transcribe meeting.webm --diarize
+brew install uv ffmpeg
 ```
 
-For repeated use, install the tool once:
+For repeated use:
 
 ```bash
-uv tool install "free-transcribe[all] @ git+https://github.com/vgmakeev/free-transcribe.git"
+uv tool install "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git"
+ft doctor
 ```
 
-## Pyannote authorization
+## Python library
 
-Before the first diarized transcription:
+```python
+from free_transcribe import save_transcript, transcribe_file
 
-1. Accept the conditions for
-   [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
-2. Create a read token in [Hugging Face settings](https://huggingface.co/settings/tokens).
-3. Set `HF_TOKEN` or run `hf auth login`.
+result = transcribe_file(
+    "meeting.mp4",
+    engine="qwen",
+    language="ru",
+    diarize=True,
+    num_speakers=3,
+)
+path = save_transcript(result, "meeting.mp4")
+```
+
+The returned `TranscriptResult` contains plain dataclasses for text, segments,
+word timestamps, speakers, language, model, and device. The CLI and both server
+adapters call this same public function.
+
+## Tiny desktop app
+
+`apps/desktop` is a Tauri 2 shell with no React and no embedded Python or model
+weights. The built macOS application is 11 MB. Drop an audio/video file, choose
+Quality or Fast, optionally enable speakers, and open the generated Markdown.
+
+The desktop app deliberately reuses the same `ft` backend and lazy model cache:
+
+```bash
+uv tool install "free-transcribe[quality] @ git+https://github.com/vgmakeev/free-transcribe.git"
+cd apps/desktop
+npm ci
+npm run tauri dev
+```
+
+It detects the engines reported by `ft doctor`, disables unavailable choices,
+streams progress, supports cancellation, and recognizes uv's default tool
+directory even when launched from Finder. Dependencies and models are still
+downloaded only when their installation profile or engine needs them.
+
+## Python HTTP backend
+
+The API is another optional adapter over the same Python library. It accepts
+uploads, queues inference in the background, reports progress, and returns the
+same Markdown as the CLI. One worker is the safe default for a single GPU.
+
+```bash
+uv tool install "free-transcribe[api,quality] @ git+https://github.com/vgmakeev/free-transcribe.git"
+
+# Local-only development server and OpenAPI UI at /docs
+ft serve
+
+# Network deployment must be authenticated
+export FT_API_TOKEN='replace-with-a-long-random-token'
+ft serve --host 0.0.0.0 --port 8000
+```
+
+```bash
+job=$(curl -s -H "Authorization: Bearer $FT_API_TOKEN" \
+  -F file=@meeting.mp4 -F speakers=true \
+  http://localhost:8000/v1/transcriptions)
+
+# Poll the ID returned above, then download its result_url.
+curl -H "Authorization: Bearer $FT_API_TOKEN" \
+  http://localhost:8000/v1/transcriptions/JOB_ID
+```
+
+Environment controls: `FT_API_CONCURRENCY` (default `1`) and
+`FT_MAX_UPLOAD_MB` (default `4096`). Jobs and uploads are local and ephemeral;
+they are removed explicitly with `DELETE /v1/transcriptions/{id}` or when the
+server stops. Use a reverse proxy for TLS and persistent external job storage
+if deploying more than one API process.
+
+## CLI
+
+```bash
+ft meeting.mp4                         # Qwen, Markdown
+ft meeting.mp4 --speakers              # automatic speaker count
+ft meeting.mp4 --speakers 3            # exact speaker count
+ft meeting.mp4 --speakers --names "Anna,Victor,Igor"
+ft meeting.mp4 --engine parakeet       # fast profile
+ft meeting.mp4 --prompt "1C MES литография"
+ft meeting.mp4 -o transcript.md
+ft meeting.mp4 -o -                    # Markdown to stdout
+```
+
+`--speakers` runs Qwen word alignment and pyannote. It is slower than plain
+text transcription because accurate speaker assignment needs word timestamps.
+
+## Agent pipeline
+
+Every expensive stage can be persisted and reused:
+
+```bash
+ft asr meeting.mp4 --timestamps word -o asr.json
+ft diarize meeting.mp4 -o speakers.json
+ft merge asr.json speakers.json -o transcript.json
+ft label transcript.json labels.json -o labelled.json   # optional
+ft render labelled.json -o transcript.md
+```
+
+This makes changing names or rendering cheap:
+
+```bash
+ft merge asr.json speakers.json --names "Anna,Victor,Igor" -o named.json
+ft render named.json -o named.md
+```
+
+JSON goes to stdout by default; progress and errors go to stderr. File outputs
+are replaced atomically. Artifacts are deterministic and content-addressed:
+
+- `free-transcribe/asr/v2`
+- `free-transcribe/diarization/v2`
+- `free-transcribe/transcript/v2`
+
+Each artifact has an ID and a SHA-256 media fingerprint. `merge` refuses inputs
+from different media. Transcript artifacts retain parent IDs, aligned words,
+regular pyannote turns with overlaps, and exclusive turns used for assignment.
+
+`ft asr` uses cheap segment timestamps by default. Request the expensive Qwen
+ForcedAligner explicitly with `--timestamps word`; word timestamps are required
+by `ft merge`.
+
+## Speakers
+
+Pyannote clusters voices as `Speaker 1`, `Speaker 2`, and so on. It does not
+claim real names, gender, or roles.
+
+- Known names can be supplied with `--names`.
+- Names can be inferred only when the recording or external metadata identifies
+  participants.
+- Roles can be inferred later by an agent from the transcript and stored as
+  separate, confidence-labelled metadata.
+- Perceived voice gender requires another classifier and is not an identity fact.
+
+Transcript artifacts keep stable `Speaker N` IDs separate from inferred labels.
+An agent writes a separate, auditable `speaker-labels/v1` assertion:
+
+```json
+{
+  "schema": "free-transcribe/speaker-labels/v1",
+  "transcript_id": "sha256:...",
+  "speakers": [{
+    "id": "Speaker 2",
+    "identity": {
+      "name": "Виктор",
+      "source": "inferred",
+      "confidence": 0.93,
+      "evidence": ["42:57 — «все вопросы Виктор ответит»"]
+    },
+    "role": {
+      "name": "координатор внедрения",
+      "source": "inferred",
+      "confidence": 0.78,
+      "evidence": ["54:07 — обсуждает архитектуру внедрения"]
+    }
+  }]
+}
+```
+
+`ft label transcript.json labels.json` validates IDs and evidence provenance,
+then creates a new content-addressed transcript whose parent is the unlabelled
+artifact. `ft render` uses the identity for display while retaining stable IDs
+in JSON. A voiceprint can be attached only after a person supplies a verified
+reference recording.
+
+Before the first pyannote run, accept the conditions for
+[Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+and authenticate:
 
 ```bash
 export HF_TOKEN=hf_your_read_token
 ```
 
-The token is used to download the gated model. It is not written to transcript
-files. Cached models can subsequently run offline.
+The token is used for gated model download and is never written to artifacts.
+Cached models can run offline afterward.
 
-Pyannote clusters voices as `Speaker 1`, `Speaker 2`, and so on. It does not
-infer real names, gender, or job roles. Known names can be supplied in order of
-first appearance:
+## Installation profiles
 
-```bash
-transcribe interview.m4a --diarize --speaker-names "Анна,Виктор,Борис"
-```
-
-## CLI
-
-```bash
-# Qwen3-ASR 1.7B is the default
-transcribe meeting.mp4
-
-# Automatic speaker count
-transcribe meeting.mp4 --diarize
-
-# A known count improves consistency
-transcribe meeting.mp4 --diarize --speakers 3
-
-# Optional terms known before transcription
-transcribe meeting.mp4 --prompt "Stenova 1С PostgreSQL"
-
-# Fast backend
-transcribe meeting.mp4 --engine parakeet
-
-# Custom compatible Hugging Face model
-transcribe meeting.mp4 --engine qwen --model Qwen/Qwen3-ASR-1.7B
-```
-
-| Option | Description |
+| Install | Includes |
 |---|---|
-| `-e, --engine qwen\|parakeet` | ASR engine; Qwen is the default |
-| `-m, --model` | Compatible local path or Hugging Face model ID |
-| `-l, --lang` | Language name/code; auto-detected when omitted |
-| `-p, --prompt` | Optional Qwen context terms known in advance |
-| `-d, --diarize` | Run pyannote and label speaker turns |
-| `--speakers N` | Exact speaker count, if known |
-| `--min-speakers N`, `--max-speakers N` | Automatic-count bounds |
-| `--speaker-names "A,B"` | Display names in first-appearance order |
-| `--diarization-device auto\|mps\|cuda\|cpu` | Pyannote device |
-| `-o, --output` | Markdown output path |
+| `free-transcribe` | zero-ML artifact CLI: merge, label, render, doctor |
+| `free-transcribe[qwen]` | Qwen text transcription |
+| `free-transcribe[quality]` | Qwen, ForcedAligner, and pyannote |
+| `free-transcribe[diarization]` | pyannote |
+| `free-transcribe[parakeet]` | fast Parakeet backend |
+| `free-transcribe[mcp]` | MCP server |
+| `free-transcribe[api]` | FastAPI/uvicorn HTTP server |
 
-## Agent CLI and reusable artifacts
+Run `ft doctor` for a machine-readable capability report. It checks the
+platform, Python, `ffmpeg`, installed engines, pyannote, MCP, and whether a
+Hugging Face token is available without exposing its value.
 
-`free-transcribe` exposes the expensive stages separately. JSON is written to
-stdout by default; use `--output` to persist it. Progress and errors go to
-stderr, so an agent can safely pipe stdout.
+## MCP
 
-```bash
-# Qwen ASR plus word alignment (free-transcribe/asr/v1)
-free-transcribe asr meeting.mp4 --lang ru --output asr.json
-
-# Pyannote only (free-transcribe/diarization/v1)
-free-transcribe diarize meeting.mp4 --output speakers.json
-
-# Cheap, repeatable merge; models are not loaded again
-free-transcribe merge asr.json speakers.json \
-  --speaker-names "Анна,Виктор,Борис" --output transcript.json
-
-# Human-readable result
-free-transcribe render transcript.json --output transcript.md
-```
-
-The diarization artifact contains both `turns`, where overlapping speakers are
-preserved, and `exclusive_turns`, which provide one speaker per interval for
-unambiguous word assignment. This lets an agent inspect interruptions, change
-speaker names, infer roles, or render another format without rerunning pyannote.
-
-The complete pipeline is still available as one command:
-
-```bash
-free-transcribe run meeting.mp4 --diarize --output transcript.md
-```
-
-The JSON contracts are versioned as `free-transcribe/asr/v1`,
-`free-transcribe/diarization/v1`, and `free-transcribe/transcript/v1`.
-
-## Model storage
-
-Typical cache sizes:
-
-| Component | Approximate disk size |
-|---|---:|
-| Qwen3-ASR 1.7B | 4.4 GB |
-| Qwen ForcedAligner 0.6B | 1.7 GB |
-| Parakeet TDT 0.6B v3 | 2.3 GB |
-| pyannote Community-1 | tens of MB |
-
-Hugging Face uses `~/.cache/huggingface` by default. Move the cache to another
-disk when needed:
-
-```bash
-export HF_HOME=/Volumes/Models/huggingface
-```
-
-Useful cache commands:
-
-```bash
-uvx --from huggingface_hub hf cache ls
-uvx --from huggingface_hub hf cache rm model/OWNER/MODEL
-uv cache prune
-```
-
-## Benchmark on an M4 Pro, 24 GB
-
-The same ten-minute Russian meeting excerpt was used for every model. Quality
-is a manual comparison of obvious wording and domain-term errors, not a claimed
-WER because no human reference transcript was available.
-
-| Model | Processing time | Peak memory | Result |
-|---|---:|---:|---|
-| Parakeet TDT 0.6B v3 | 5.7 s | 3.68 GB | Very strong and fastest |
-| Whisper Medium | 21.7 s | 0.77 GB | Fast, weaker text |
-| Whisper Large-v3 Turbo | 19.8 s | 2.80 GB | Weaker than Qwen/Parakeet |
-| Whisper Large-v3 | 61.8 s | 2.31 GB | Better Whisper, still weaker |
-| MOSS Transcribe Diarize | 60.1 s | 3.76 GB | Two speakers, noisy text |
-| VibeVoice-ASR 4-bit | 138.0 s | 11.44 GB | Three speakers, uneven text |
-| Qwen3-ASR 1.7B | 179.7 s | 5.03 GB | Best overall domain text |
-| pyannote Community-1 | 25.6 s | 1.47 GB | Correctly found three speakers |
-
-Qwen alignment adds substantial latency. Parakeet already emits word timestamps,
-so `parakeet --diarize` is the recommended fast profile.
-
-## MCP server
+MCP is deliberately not part of the base installation:
 
 ```json
 {
@@ -208,7 +247,7 @@ so `parakeet --diarize` is the recommended fast profile.
       "command": "uvx",
       "args": [
         "--from",
-        "free-transcribe[all] @ git+https://github.com/vgmakeev/free-transcribe.git",
+        "free-transcribe[mcp,quality] @ git+https://github.com/vgmakeev/free-transcribe.git",
         "free-transcribe-mcp"
       ],
       "env": {
@@ -219,20 +258,48 @@ so `parakeet --diarize` is the recommended fast profile.
 }
 ```
 
-The MCP tool exposes the same engine, model, language, context, diarization,
-speaker-count, speaker-name, and output options as the CLI.
+## Measured profiles
 
-## Portability
+Same ten-minute Russian meeting excerpt, M4 Pro with 24 GB. Quality is a manual
+comparison because no human reference transcript was available.
 
-The normalized backend interface is ready for platform-specific implementations:
+| Pipeline | Time | Peak memory | Outcome |
+|---|---:|---:|---|
+| Parakeet TDT 0.6B v3 | 5.7 s | 3.68 GB | Fastest, strong text |
+| Qwen3-ASR 1.7B | 179.7 s | 5.03 GB | Best domain text |
+| pyannote Community-1 | 25.6 s | 1.47 GB | Correctly found 3 speakers |
 
-- macOS Apple Silicon: MLX (verified)
-- Linux/NVIDIA: PyTorch/CUDA and NeMo adapters (planned)
-- Windows/NVIDIA: PyTorch or WSL2 adapters (planned)
-- CPU and Linux/AMD ROCm: experimental future targets
+The complete 54:56 test recording finished in 19:43 with Qwen, ForcedAligner,
+and pyannote, used about 5 GB peak RSS, found three speakers automatically, and
+reached the final utterance at 54:55.
 
-The README will only mark a platform verified after real inference tests, not
-merely import-only CI.
+## Model storage
+
+Typical Hugging Face cache sizes:
+
+| Model | Approximate size |
+|---|---:|
+| Qwen3-ASR 1.7B | 4.7 GB |
+| Qwen ForcedAligner 0.6B | 1.8 GB |
+| Parakeet TDT 0.6B v3 | 2.3 GB |
+| pyannote Community-1 | 33 MB |
+
+```bash
+export HF_HOME=/Volumes/Models/huggingface
+uvx --from huggingface_hub hf cache ls
+uv cache prune
+```
+
+## Platforms
+
+- macOS Apple Silicon with MLX: verified
+- Windows/NVIDIA: official Qwen Transformers/CUDA adapter implemented; dependency
+  resolution and Tauri compilation are tested, real GPU inference is not yet verified
+- Linux/NVIDIA: same official CUDA adapter is packaged, not yet verified
+- CPU, ROCm, and other platforms: not production-supported yet
+
+The CLI and artifact contracts are platform-neutral. A platform is only marked
+verified after real inference tests.
 
 ## License
 

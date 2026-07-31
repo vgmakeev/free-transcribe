@@ -1,9 +1,11 @@
-"""Core transcription and speaker diarization logic."""
+"""ASR, alignment, diarization, and transcript rendering."""
 
 from __future__ import annotations
 
 import os
 import platform
+import subprocess
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -33,6 +35,7 @@ DEFAULT_MODELS = {
 }
 DEFAULT_MODEL = DEFAULT_MODELS[DEFAULT_ENGINE]
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+DEFAULT_FORCED_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 
 LANGUAGE_NAMES = {
     "ru": "Russian",
@@ -344,11 +347,15 @@ class _EngineOutput:
     device: str
 
 
+def _is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
 def _require_apple_silicon(engine: str) -> None:
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
+    if not _is_apple_silicon():
         raise RuntimeError(
             f"The {engine} MLX backend requires Apple Silicon. "
-            "CUDA and CPU adapters are planned but are not yet verified."
+            "This engine does not have a backend for the current platform."
         )
 
 
@@ -358,7 +365,7 @@ def _qwen_language(language: str | None) -> str | None:
     return LANGUAGE_NAMES.get(language.casefold(), language)
 
 
-def _transcribe_qwen(
+def _transcribe_qwen_mlx(
     file_path: str,
     *,
     model_name: str,
@@ -371,8 +378,7 @@ def _transcribe_qwen(
         from mlx_qwen3_asr import transcribe as qwen_transcribe
     except ImportError as exc:
         raise RuntimeError(
-            "Qwen support is not installed. Reinstall free-transcribe with "
-            "the default Apple dependencies."
+            "Qwen support is not installed. Install the 'qwen' or 'quality' extra."
         ) from exc
 
     result = qwen_transcribe(
@@ -409,6 +415,139 @@ def _transcribe_qwen(
         language=str(result.language or language or "unknown"),
         duration_min=duration / 60,
         device="mlx",
+    )
+
+
+def _media_duration_seconds(file_path: str) -> float:
+    """Read duration without loading media into Python memory."""
+    try:
+        process = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return max(0.0, float(process.stdout.strip()))
+    except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+        return 0.0
+
+
+def _transcribe_qwen_torch(
+    file_path: str,
+    *,
+    model_name: str,
+    language: str | None,
+    context: str | None,
+    need_words: bool,
+) -> _EngineOutput:
+    """Official Qwen Transformers backend for NVIDIA CUDA (Windows/Linux)."""
+    try:
+        import torch
+        from qwen_asr import Qwen3ASRModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "Qwen CUDA support is not installed. Install the 'qwen' or "
+            "'quality' extra."
+        ) from exc
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "The Qwen backend on Windows/Linux currently requires an NVIDIA "
+            "GPU with a working CUDA build of PyTorch."
+        )
+
+    device = "cuda:0"
+    options: dict[str, Any] = {
+        "dtype": torch.bfloat16,
+        "device_map": device,
+        "max_inference_batch_size": 8,
+        "max_new_tokens": 4096,
+    }
+    if need_words:
+        options.update(
+            {
+                "forced_aligner": DEFAULT_FORCED_ALIGNER_MODEL,
+                "forced_aligner_kwargs": {
+                    "dtype": torch.bfloat16,
+                    "device_map": device,
+                },
+            }
+        )
+
+    model = Qwen3ASRModel.from_pretrained(model_name, **options)
+    # Contextual prompting is currently an MLX-only feature. Keeping this
+    # argument in the adapter boundary makes it possible to add when the
+    # official Transformers backend exposes it.
+    del context
+    results = model.transcribe(
+        audio=file_path,
+        language=_qwen_language(language),
+        return_time_stamps=need_words,
+    )
+    if not results:
+        raise RuntimeError("Qwen returned no transcription result")
+    result = results[0]
+    raw_timestamps = list(getattr(result, "time_stamps", None) or [])
+    words = [
+        TranscriptWord(
+            float(item.start_time),
+            float(item.end_time),
+            str(item.text),
+        )
+        for item in raw_timestamps
+        if getattr(item, "start_time", None) is not None
+        and getattr(item, "end_time", None) is not None
+    ]
+    duration = max(
+        [word.end for word in words] + [_media_duration_seconds(file_path), 0.0]
+    )
+    text = str(getattr(result, "text", "")).strip()
+    segments = (
+        [TranscriptSegment(word.start, word.end, word.text.strip()) for word in words]
+        if words
+        else [TranscriptSegment(0.0, duration, text)]
+    )
+    return _EngineOutput(
+        text=text,
+        segments=[segment for segment in segments if segment.text],
+        words=words,
+        language=str(getattr(result, "language", None) or language or "unknown"),
+        duration_min=duration / 60,
+        device="cuda",
+    )
+
+
+def _transcribe_qwen(
+    file_path: str,
+    *,
+    model_name: str,
+    language: str | None,
+    context: str | None,
+    need_words: bool,
+) -> _EngineOutput:
+    if _is_apple_silicon():
+        return _transcribe_qwen_mlx(
+            file_path,
+            model_name=model_name,
+            language=language,
+            context=context,
+            need_words=need_words,
+        )
+    return _transcribe_qwen_torch(
+        file_path,
+        model_name=model_name,
+        language=language,
+        context=context,
+        need_words=need_words,
     )
 
 
@@ -500,7 +639,7 @@ def diarize_media(
     except ImportError as exc:
         raise RuntimeError(
             "Speaker diarization is not installed. Install the optional dependencies "
-            "with: uv tool install 'free-transcribe[diarization] @ "
+            "with: uv tool install 'free-transcribe[quality] @ "
             "git+https://github.com/vgmakeev/free-transcribe.git'"
         ) from exc
 
@@ -640,7 +779,8 @@ def transcribe_file(
 
     _validate_speaker_counts(num_speakers, min_speakers, max_speakers)
     if on_progress:
-        on_progress("device", "Using the Apple Silicon MLX backend")
+        backend = "Apple Silicon MLX" if _is_apple_silicon() else "NVIDIA CUDA"
+        on_progress("device", f"Using the {backend} backend")
         on_progress("loading", f"Loading {engine} model {resolved_model}...")
         on_progress("transcribing", "Transcribing...")
 
@@ -761,6 +901,19 @@ def save_transcript(
         )
 
     markdown = result_to_markdown(result, os.path.basename(source_path))
-    with open(output_file, "w", encoding="utf-8") as file_handle:
-        file_handle.write(markdown)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=os.path.dirname(os.path.abspath(output_file)),
+            prefix=f".{os.path.basename(output_file)}.",
+            delete=False,
+        ) as file_handle:
+            file_handle.write(markdown)
+            temporary_name = file_handle.name
+        os.replace(temporary_name, output_file)
+    finally:
+        if temporary_name and os.path.exists(temporary_name):
+            os.unlink(temporary_name)
     return output_file

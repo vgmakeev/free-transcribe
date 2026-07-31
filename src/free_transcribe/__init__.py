@@ -1,6 +1,6 @@
-"""Free Transcribe - local multi-engine audio/video transcription."""
+"""Free Transcribe — local, composable speech transcription."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .core import (
     AVAILABLE_ENGINES,

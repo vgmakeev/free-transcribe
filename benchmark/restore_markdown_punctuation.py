@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from whisper_transcribe.core import TranscriptSegment, restore_segment_punctuation
+from free_transcribe.core import TranscriptSegment, restore_segment_punctuation
 
 LINE_PATTERN = re.compile(
     r"^\*\*\[([^]]+)\](?: ([^:*]+):)?\*\*\s+(.*)$"

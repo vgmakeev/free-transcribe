@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Free Transcribe</title>
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="mark" aria-hidden="true">ft</div>
+        <div>
+          <h1>Free Transcribe</h1>
+          <p id="runtime">Checking local engine…</p>
+        </div>
+      </header>
+
+      <button id="drop" class="drop" type="button">
+        <span class="drop-title">Drop audio or video</span>
+        <span id="file-label">or choose a local file</span>
+      </button>
+
+      <section class="options" aria-label="Transcription options">
+        <label>
+          Profile
+          <select id="engine">
+            <option value="qwen">Quality · Qwen</option>
+            <option value="parakeet">Fast · Parakeet</option>
+          </select>
+        </label>
+
+        <label class="switch-row">
+          <span>
+            Speakers
+            <small>pyannote, automatic count</small>
+          </span>
+          <input id="speakers" type="checkbox" />
+        </label>
+
+        <label id="count-row" class="count-row hidden">
+          Exact count <input id="speaker-count" type="number" min="1" placeholder="auto" />
+        </label>
+      </section>
+
+      <div class="actions">
+        <button id="start" class="primary" type="button" disabled>Transcribe</button>
+        <button id="cancel" type="button" class="quiet hidden">Cancel</button>
+        <button id="open-result" type="button" class="quiet hidden">Open result</button>
+      </div>
+
+      <section id="status" class="status" aria-live="polite">
+        <div class="status-line">
+          <span id="status-text">Ready</span>
+          <span id="elapsed"></span>
+        </div>
+        <div class="progress"><span id="progress-bar"></span></div>
+        <pre id="log"></pre>
+      </section>
+    </main>
+  </body>
+</html>
