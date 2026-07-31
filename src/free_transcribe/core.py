@@ -372,6 +372,7 @@ def _transcribe_qwen_mlx(
     language: str | None,
     context: str | None,
     need_words: bool,
+    on_progress: ProgressCallback | None = None,
 ) -> _EngineOutput:
     _require_apple_silicon("Qwen3-ASR")
     try:
@@ -381,6 +382,23 @@ def _transcribe_qwen_mlx(
             "Qwen support is not installed. Install the 'qwen' or 'quality' extra."
         ) from exc
 
+    def mlx_progress(payload: dict[str, Any]) -> None:
+        if on_progress is None or payload.get("event") not in {
+            "chunks_prepared",
+            "chunk_completed",
+        }:
+            return
+        fraction = min(max(float(payload.get("progress", 0.0)), 0.0), 1.0)
+        percent = int(fraction * 100)
+        processed = float(payload.get("processed_audio_sec", 0.0))
+        duration = float(payload.get("audio_duration_sec", 0.0))
+        chunk = int(payload.get("chunk_index", 0))
+        chunks = int(payload.get("total_chunks", 0))
+        details = f"{format_timestamp(processed)} / {format_timestamp(duration)}"
+        if chunks:
+            details += f" · chunk {chunk}/{chunks}"
+        on_progress("transcribing", f"Transcribing… {percent}% · {details}")
+
     result = qwen_transcribe(
         file_path,
         model=model_name,
@@ -388,6 +406,7 @@ def _transcribe_qwen_mlx(
         language=_qwen_language(language),
         return_timestamps=need_words,
         return_chunks=True,
+        on_progress=mlx_progress,
     )
     raw_words = list(result.segments or [])
     words = _words_from_items(raw_words)
@@ -448,8 +467,10 @@ def _transcribe_qwen_torch(
     language: str | None,
     context: str | None,
     need_words: bool,
+    on_progress: ProgressCallback | None = None,
 ) -> _EngineOutput:
     """Official Qwen Transformers backend for NVIDIA CUDA (Windows/Linux)."""
+    del on_progress
     try:
         import torch
         from qwen_asr import Qwen3ASRModel
@@ -533,6 +554,7 @@ def _transcribe_qwen(
     language: str | None,
     context: str | None,
     need_words: bool,
+    on_progress: ProgressCallback | None = None,
 ) -> _EngineOutput:
     if _is_apple_silicon():
         return _transcribe_qwen_mlx(
@@ -541,6 +563,7 @@ def _transcribe_qwen(
             language=language,
             context=context,
             need_words=need_words,
+            on_progress=on_progress,
         )
     return _transcribe_qwen_torch(
         file_path,
@@ -548,6 +571,7 @@ def _transcribe_qwen(
         language=language,
         context=context,
         need_words=need_words,
+        on_progress=on_progress,
     )
 
 
@@ -791,6 +815,7 @@ def transcribe_file(
             language=language,
             context=prompt,
             need_words=diarize or word_timestamps,
+            on_progress=on_progress,
         )
     else:
         engine_output = _transcribe_parakeet(

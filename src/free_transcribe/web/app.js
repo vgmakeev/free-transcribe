@@ -119,12 +119,7 @@ function submit(form) {
   });
 }
 
-async function poll(job) {
-  while (true) {
-    const response = await fetch(`/v1/transcriptions/${job.id}`, { headers: headers() });
-    if (!response.ok) throw new Error(await errorMessage(response));
-    job = await response.json();
-
+function renderJob(job) {
     if (job.status === "queued") {
       setProgress(job.progress.message, {
         stage: "model",
@@ -136,11 +131,13 @@ async function poll(job) {
         setProgress(job.progress.message, { stage: "model", completed: ["upload"] });
       } else if (stage === "transcribing") {
         setProgress(job.progress.message, {
+          percent: job.progress.percent ?? null,
           stage: "text",
           completed: ["upload", "model"],
         });
       } else if (stage.startsWith("diarization")) {
         setProgress(job.progress.message, {
+          percent: job.progress.percent ?? null,
           stage: "speakers",
           completed: ["upload", "model", "text"],
         });
@@ -148,9 +145,36 @@ async function poll(job) {
     }
 
     if (job.status === "failed") throw new Error(job.error ?? "Transcription failed");
-    if (job.status === "succeeded") return job;
-    await new Promise((resolve) => window.setTimeout(resolve, 900));
+}
+
+async function observe(job) {
+  const response = await fetch(`/v1/transcriptions/${job.id}/events`, {
+    headers: { ...headers(), Accept: "text/event-stream" },
+  });
+  if (!response.ok) throw new Error(await errorMessage(response));
+  if (!response.body) throw new Error("SSE is not supported by this browser");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const data = frame.split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!data) continue;
+      job = JSON.parse(data);
+      renderJob(job);
+      if (job.status === "succeeded") return job;
+    }
+    if (done) break;
   }
+  throw new Error("Progress stream ended before transcription completed");
 }
 
 async function transcribe() {
@@ -172,7 +196,7 @@ async function transcribe() {
 
   try {
     const submitted = await submit(form);
-    const job = await poll(submitted);
+    const job = await observe(submitted);
     const response = await fetch(job.result_url, { headers: headers() });
     if (!response.ok) throw new Error(await errorMessage(response));
     elements.transcript.value = await response.text();

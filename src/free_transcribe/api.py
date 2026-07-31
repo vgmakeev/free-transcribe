@@ -2,10 +2,13 @@
 
 import asyncio
 import hmac
+import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,7 +16,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -45,12 +48,16 @@ class _Job:
     completed_at: str | None = None
     result_path: Path | None = None
     error: str | None = None
+    progress_percent: float | None = None
 
     def public(self) -> dict[str, Any]:
+        progress: dict[str, Any] = {"stage": self.stage, "message": self.message}
+        if self.progress_percent is not None:
+            progress["percent"] = self.progress_percent
         payload: dict[str, Any] = {
             "id": self.id,
             "status": self.status,
-            "progress": {"stage": self.stage, "message": self.message},
+            "progress": progress,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -107,6 +114,7 @@ def create_app(
 
     jobs: dict[str, _Job] = {}
     tasks: dict[str, asyncio.Task[None]] = {}
+    subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
     inference_slots = asyncio.Semaphore(worker_count)
     admission_lock = asyncio.Lock()
     uploads_in_progress = 0
@@ -172,6 +180,18 @@ def create_app(
             }
         return payload
 
+    def publish(job: _Job) -> None:
+        payload = public_job(job)
+        for queue in subscribers.get(job.id, set()):
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(payload)
+
+    def publish_waiting() -> None:
+        for candidate in jobs.values():
+            if candidate.status == "queued":
+                publish(candidate)
+
     async def execute(
         job: _Job,
         *,
@@ -185,10 +205,21 @@ def create_app(
         async with inference_slots:
             job.status = "running"
             job.started_at = _now()
+            publish(job)
+            publish_waiting()
+            loop = asyncio.get_running_loop()
 
             def progress(stage: str, message: str) -> None:
+                loop.call_soon_threadsafe(update_progress, stage, message)
+
+            def update_progress(stage: str, message: str) -> None:
                 job.stage = stage
                 job.message = message
+                job.progress_percent = None
+                match = re.search(r"\b(\d{1,3}(?:\.\d+)?)%", message)
+                if match:
+                    job.progress_percent = min(100.0, float(match.group(1)))
+                publish(job)
 
             try:
                 result = await asyncio.to_thread(
@@ -213,6 +244,8 @@ def create_app(
                 job.status = "succeeded"
                 job.stage = "complete"
                 job.message = "Transcription complete"
+                job.progress_percent = 100.0
+                publish(job)
             # This is the boundary of a background job: model/framework errors
             # must become observable job failures instead of orphaned tasks.
             except Exception as exc:  # noqa: BLE001
@@ -220,6 +253,7 @@ def create_app(
                 job.stage = "failed"
                 job.message = "Transcription failed"
                 job.error = str(exc)
+                publish(job)
             finally:
                 job.completed_at = _now()
 
@@ -337,6 +371,45 @@ def create_app(
     @app.get("/v1/transcriptions/{job_id}", dependencies=[Depends(authorize)])
     async def status(job_id: str) -> dict[str, Any]:
         return public_job(find_job(job_id))
+
+    @app.get(
+        "/v1/transcriptions/{job_id}/events",
+        response_class=StreamingResponse,
+        dependencies=[Depends(authorize)],
+    )
+    async def events(job_id: str, request: Request) -> StreamingResponse:
+        job = find_job(job_id)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=4)
+        subscribers.setdefault(job_id, set()).add(queue)
+
+        async def stream() -> AsyncIterator[str]:
+            payload = public_job(job)
+            try:
+                while True:
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    if payload["status"] in {"succeeded", "failed"}:
+                        break
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                listeners = subscribers.get(job_id)
+                if listeners is not None:
+                    listeners.discard(queue)
+                    if not listeners:
+                        subscribers.pop(job_id, None)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get(
         "/v1/transcriptions/{job_id}/result",

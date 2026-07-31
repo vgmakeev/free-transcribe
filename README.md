@@ -87,7 +87,7 @@ downloaded only when their installation profile or engine needs them.
 
 The API is another optional adapter over the same Python library. Its built-in
 web UI at `/` accepts drag-and-drop uploads, shows upload/model/ASR/diarization
-progress, and can copy or download the final transcript. The same operations
+progress streamed live over SSE, and can copy or download the final transcript. The same operations
 remain available as JSON endpoints under `/v1` and OpenAPI at `/docs`.
 
 One worker is the safe default for a single GPU. Additional requests wait in a

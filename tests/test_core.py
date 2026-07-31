@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from free_transcribe.core import (
@@ -10,6 +11,7 @@ from free_transcribe.core import (
     TranscriptWord,
     _EngineOutput,
     _transcribe_qwen,
+    _transcribe_qwen_mlx,
     assign_speakers_to_words,
     format_timestamp,
     restore_segment_punctuation,
@@ -139,6 +141,52 @@ class MarkdownTests(unittest.TestCase):
 
 
 class TranscriptionPipelineTests(unittest.TestCase):
+    def test_mlx_reports_real_processed_audio_progress(self):
+        events = []
+
+        def fake_transcribe(_path, **options):
+            options["on_progress"](
+                {
+                    "event": "chunks_prepared",
+                    "total_chunks": 4,
+                    "audio_duration_sec": 120.0,
+                    "progress": 0.0,
+                }
+            )
+            options["on_progress"](
+                {
+                    "event": "chunk_completed",
+                    "chunk_index": 1,
+                    "total_chunks": 4,
+                    "audio_duration_sec": 120.0,
+                    "processed_audio_sec": 30.0,
+                    "progress": 0.25,
+                }
+            )
+            return SimpleNamespace(
+                text="Hello",
+                language="English",
+                segments=[],
+                chunks=[{"start": 0.0, "end": 30.0, "text": "Hello"}],
+            )
+
+        with (
+            patch("free_transcribe.core._is_apple_silicon", return_value=True),
+            patch("mlx_qwen3_asr.transcribe", side_effect=fake_transcribe),
+        ):
+            _transcribe_qwen_mlx(
+                "meeting.wav",
+                model_name="test/model",
+                language=None,
+                context=None,
+                need_words=False,
+                on_progress=lambda stage, message: events.append((stage, message)),
+            )
+
+        self.assertEqual(events[0][0], "transcribing")
+        self.assertIn("0% · 00:00 / 02:00 · chunk 0/4", events[0][1])
+        self.assertIn("25% · 00:30 / 02:00 · chunk 1/4", events[1][1])
+
     def test_qwen_dispatches_to_mlx_on_apple_silicon(self):
         expected = _EngineOutput("text", [], [], "ru", 0.0, "mlx")
         with (

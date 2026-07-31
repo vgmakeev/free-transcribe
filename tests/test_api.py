@@ -69,6 +69,12 @@ class ApiTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
             self.assertIn("Привет", response.text)
+            events = client.get(
+                f"/v1/transcriptions/{job_id}/events", headers=headers
+            )
+            self.assertEqual(events.status_code, 200)
+            self.assertTrue(events.headers["content-type"].startswith("text/event-stream"))
+            self.assertIn('"status": "succeeded"', events.text)
             self.assertEqual(
                 client.delete(
                     f"/v1/transcriptions/{job_id}", headers=headers

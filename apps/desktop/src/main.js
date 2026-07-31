@@ -69,6 +69,7 @@ function refreshProfileInfo() {
     ? " · +1.8 GB speaker aligner"
     : "";
   elements.profileInfo.textContent = `First use: ~${profile.size}${alignment} · ${profile.note}. Cached afterward.`;
+  elements.countRow.classList.toggle("hidden", !elements.speakers.checked);
 }
 
 function setStage(active, completed = []) {
@@ -197,8 +198,14 @@ async function transcribe() {
       if (["device", "loading"].includes(stage)) setStage("model");
       if (stage === "transcribing") {
         setStage("transcription", ["model"]);
-        elements.progressBar.style.width = "";
-        elements.progressBar.classList.add("active");
+        const progress = message.match(/\b(\d{1,3}(?:\.\d+)?)%/);
+        if (progress) {
+          elements.progressBar.classList.remove("active");
+          elements.progressBar.style.width = `${Math.min(100, Number(progress[1]))}%`;
+        } else {
+          elements.progressBar.style.width = "";
+          elements.progressBar.classList.add("active");
+        }
       }
       if (["diarization_loading", "diarizing"].includes(stage)) {
         setStage("speakers", ["model", "transcription"]);
