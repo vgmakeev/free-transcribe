@@ -14,6 +14,7 @@ from free_transcribe.core import (
     TranscriptWord,
     _EngineOutput,
     _normalized_audio_path,
+    _pyannote_progress_hook,
     _transcribe_qwen,
     _transcribe_qwen_mlx,
     assign_speakers_to_words,
@@ -145,6 +146,21 @@ class MarkdownTests(unittest.TestCase):
 
 
 class TranscriptionPipelineTests(unittest.TestCase):
+    def test_pyannote_reports_real_embedding_batch_progress(self):
+        events = []
+        hook = _pyannote_progress_hook(
+            lambda stage, message: events.append((stage, message))
+        )
+
+        self.assertIsNotNone(hook)
+        hook("embeddings", None, total=20, completed=7)
+
+        self.assertEqual(events[0][0], "diarizing")
+        self.assertIn("35% · 7/20 batches", events[0][1])
+
+        hook("embeddings", None, total=20, completed=32)
+        self.assertIn("100% · 20/20 batches", events[1][1])
+
     def test_video_audio_is_extracted_as_mono_16khz_flac(self):
         with (
             patch("free_transcribe.core.subprocess.run") as run,

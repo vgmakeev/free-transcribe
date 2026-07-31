@@ -712,6 +712,46 @@ def _validate_speaker_counts(
         raise ValueError("min_speakers cannot be greater than max_speakers")
 
 
+def _pyannote_progress_hook(
+    on_progress: ProgressCallback | None,
+) -> Callable[..., None] | None:
+    """Adapt pyannote's internal batch hook to our progress contract."""
+    if on_progress is None:
+        return None
+
+    labels = {
+        "segmentation": "Speech segmentation complete",
+        "speaker_counting": "Speaker counting complete",
+        "embeddings": "Speaker embeddings complete",
+        "discrete_diarization": "Finalizing speaker turns",
+    }
+
+    def hook(
+        step_name: str,
+        _artifact: Any,
+        *,
+        file: Any = None,
+        total: int | None = None,
+        completed: int | None = None,
+    ) -> None:
+        del file
+        if total is not None and completed is not None and total > 0:
+            bounded_completed = min(completed, total)
+            percent = round(bounded_completed / total * 100)
+            on_progress(
+                "diarizing",
+                f"Identifying speakers… embeddings {percent}% · "
+                f"{bounded_completed}/{total} batches",
+            )
+            return
+        on_progress(
+            "diarizing",
+            labels.get(step_name, step_name.replace("_", " ").capitalize()),
+        )
+
+    return hook
+
+
 def diarize_media(
     file_path: str,
     *,
@@ -753,6 +793,9 @@ def diarize_media(
             "set HF_TOKEN, or run `hf auth login`."
         ) from exc
 
+    if on_progress:
+        on_progress("diarization_loading", "Diarization model ready · 100%")
+
     resolved_device = device
     if resolved_device == "auto":
         if torch.cuda.is_available():
@@ -784,9 +827,14 @@ def diarize_media(
             "diarizing", f"Identifying speakers on {resolved_device.upper()}..."
         )
 
+    progress_hook = _pyannote_progress_hook(on_progress)
     with _normalized_audio_path(file_path) as diarization_path:
         try:
-            output = pipeline(diarization_path, **diarization_options)
+            output = pipeline(
+                diarization_path,
+                hook=progress_hook,
+                **diarization_options,
+            )
         except RuntimeError:
             if device != "auto" or resolved_device == "cpu":
                 raise
@@ -797,7 +845,11 @@ def diarize_media(
                 )
             pipeline.to(torch.device("cpu"))
             resolved_device = "cpu"
-            output = pipeline(diarization_path, **diarization_options)
+            output = pipeline(
+                diarization_path,
+                hook=progress_hook,
+                **diarization_options,
+            )
 
     annotation = getattr(output, "speaker_diarization", output)
     turns = [

@@ -209,8 +209,14 @@ async function transcribe() {
       }
       if (["diarization_loading", "diarizing"].includes(stage)) {
         setStage("speakers", ["model", "transcription"]);
-        elements.progressBar.style.width = "";
-        elements.progressBar.classList.add("active");
+        const progress = message.match(/\b(\d{1,3}(?:\.\d+)?)%/);
+        if (progress) {
+          elements.progressBar.classList.remove("active");
+          elements.progressBar.style.width = `${Math.min(100, Number(progress[1]))}%`;
+        } else {
+          elements.progressBar.style.width = "";
+          elements.progressBar.classList.add("active");
+        }
       }
       if (stage === "complete") {
         setStage("done", ["model", "transcription", "speakers"]);
