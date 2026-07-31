@@ -1,8 +1,13 @@
 # Free Transcribe
 
-Accurate local transcription with Qwen, optional pyannote speakers, and a fast
-Parakeet alternative. Optimized for Apple Silicon and designed to compose well
-from agents and shell scripts.
+Local audio/video transcription with speaker diarization. Choose fast Parakeet
+or maximum-quality Qwen, keep media on your machine, and use the same core from
+the CLI, Python, web API, desktop app, or an agent pipeline.
+
+[![CI](https://github.com/vgmakeev/free-transcribe/actions/workflows/ci.yml/badge.svg)](https://github.com/vgmakeev/free-transcribe/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vgmakeev/free-transcribe)](https://github.com/vgmakeev/free-transcribe/releases/latest)
+[![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ```text
 free_transcribe · Python library/core
@@ -15,29 +20,38 @@ free_transcribe · Python library/core
 The interfaces share models, caches, transcript logic, and versioned artifacts;
 none of them contains a second transcription implementation.
 
-The web and desktop interfaces expose two profiles everywhere they are
-supported: **Fast** uses Parakeet, while **Maximum quality** uses Qwen 1.7B.
-Both can add pyannote speaker labels. On Linux the same choices use native
-NVIDIA CUDA backends inside the container.
+## Pick a profile
+
+| Profile | ASR | Speakers | Best for |
+|---|---|---|---|
+| **Fast** | Parakeet TDT 0.6B v3 | pyannote Community-1 | long meetings and everyday use |
+| **Maximum quality** | Qwen3-ASR 1.7B + ForcedAligner when needed | pyannote Community-1 | terminology, names, and difficult mixed Russian/English audio |
+
+Both profiles are available in the web and desktop interfaces. The UI enables
+speaker identification by default; the CLI and API require it explicitly. On
+Linux, the container runs the same choices through NVIDIA CUDA backends.
 
 ## Quick start
 
 ```bash
-# Recommended on Apple Silicon: fast text plus automatic speaker labels
-uvx --from "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+# Fast, with automatic speaker count
+uvx --from "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0" \
   ft meeting.mp4 --speakers
 
-# Maximum terminology accuracy: Qwen3-ASR 1.7B plus speakers
-uvx --from "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git" \
+# Maximum quality, with Qwen3-ASR 1.7B and speakers
+uvx --from "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0" \
   ft meeting.mp4 --engine qwen --speakers
 ```
 
-Models are downloaded lazily from Hugging Face. They are not bundled with the
-package or repository. For video input, `ffmpeg` first extracts one temporary
-mono 16 kHz FLAC; ASR and pyannote share it, and it is deleted after the job.
+Python dependencies are installed only for the selected extra. Model weights
+are downloaded lazily on the first use of each engine and cached by Hugging
+Face; they are not bundled with the package or repository. For video input,
+`ffmpeg` extracts one temporary mono 16 kHz FLAC. ASR and pyannote share it, and
+it is deleted after the job.
 
 Requirements: Python 3.14, `uv`, and `ffmpeg`. Apple Silicon is the verified
-inference platform; the Windows/NVIDIA adapter is experimental.
+inference platform. Linux/NVIDIA and Windows/NVIDIA adapters are packaged and
+CI-tested; real GPU inference validation is still pending.
 
 ```bash
 brew install uv ffmpeg
@@ -46,8 +60,21 @@ brew install uv ffmpeg
 For repeated use:
 
 ```bash
-uv tool install "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git"
+uv tool install "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0"
 ft doctor
+```
+
+Installation profiles by platform:
+
+```bash
+# macOS Apple Silicon: MLX Qwen + MLX Parakeet + pyannote
+uv tool install "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0"
+
+# Windows with NVIDIA CUDA: Qwen + pyannote
+uv tool install "free-transcribe[windows] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0"
+
+# Linux with NVIDIA CUDA: Qwen + NeMo Parakeet + pyannote
+uv tool install "free-transcribe[cuda] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0"
 ```
 
 ## Python library
@@ -78,7 +105,7 @@ Quality or Fast, optionally enable speakers, and open the generated Markdown.
 The desktop app deliberately reuses the same `ft` backend and lazy model cache:
 
 ```bash
-uv tool install "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git"
+uv tool install "free-transcribe[apple] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0"
 cd apps/desktop
 npm ci
 npm run tauri dev
@@ -92,16 +119,17 @@ downloaded only when their installation profile or engine needs them.
 ## Python HTTP backend
 
 The API is another optional adapter over the same Python library. Its built-in
-web UI at `/` accepts drag-and-drop uploads, shows upload/model/ASR/diarization
-progress streamed live over SSE, and can copy or download the final transcript. The same operations
-remain available as JSON endpoints under `/v1` and OpenAPI at `/docs`.
+web UI at `/` accepts drag-and-drop uploads, lets users choose Fast or Maximum
+quality, and shows upload/model/ASR/diarization progress streamed live over SSE.
+The result can be copied or downloaded. The same operations remain available as
+JSON endpoints under `/v1`, with OpenAPI at `/docs`.
 
 One worker is the safe default for a single GPU. Additional requests wait in a
 bounded in-process queue and receive a queue position; a full queue returns
 HTTP `429` with `Retry-After` instead of overcommitting GPU memory.
 
 ```bash
-uv tool install "free-transcribe[api,apple] @ git+https://github.com/vgmakeev/free-transcribe.git"
+uv tool install "free-transcribe[api,apple] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0"
 
 # Local-only development server; web UI at / and OpenAPI at /docs
 ft serve
@@ -278,7 +306,7 @@ MCP is deliberately not part of the base installation:
       "command": "uvx",
       "args": [
         "--from",
-        "free-transcribe[mcp,apple] @ git+https://github.com/vgmakeev/free-transcribe.git",
+        "free-transcribe[mcp,apple] @ git+https://github.com/vgmakeev/free-transcribe.git@v0.2.0",
         "free-transcribe-mcp"
       ],
       "env": {
