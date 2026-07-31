@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+apps
+benchmark
+build
+dist
+tests
+uv.lock

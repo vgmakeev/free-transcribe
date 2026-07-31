@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Free Transcribe</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="mark">ft</div>
+        <div><h1>Free Transcribe</h1><p id="runtime">Connecting…</p></div>
+      </header>
+
+      <section class="card">
+        <label id="auth-row" class="auth hidden">
+          API token
+          <input id="token" type="password" autocomplete="current-password" placeholder="Bearer token" />
+        </label>
+        <button id="drop" class="drop" type="button">
+          <strong>Drop audio or video</strong>
+          <span id="file-label">or choose a local file</span>
+        </button>
+        <input id="file" type="file" accept="audio/*,video/*" hidden />
+
+        <div class="options">
+          <label>Profile
+            <select id="profile">
+              <option value="quality">Best quality · Qwen 1.7B</option>
+              <option value="compact">Compact · Qwen 0.6B</option>
+            </select>
+          </label>
+          <small id="profile-info"></small>
+          <label class="switch">
+            <span>Identify speakers<small>Qwen aligner + pyannote</small></span>
+            <input id="speakers" type="checkbox" />
+          </label>
+          <label id="count-row" class="hidden">Exact speaker count
+            <input id="speaker-count" type="number" min="1" placeholder="auto" />
+          </label>
+        </div>
+        <button id="start" class="primary" type="button" disabled>Transcribe</button>
+      </section>
+
+      <section id="progress" class="progress-panel hidden" aria-live="polite">
+        <ol id="stages" class="stages">
+          <li data-step="upload"><span>1</span>Upload</li>
+          <li data-step="model"><span>2</span>Model</li>
+          <li data-step="text"><span>3</span>Text</li>
+          <li data-step="speakers"><span>4</span>Speakers</li>
+          <li data-step="done"><span>5</span>Done</li>
+        </ol>
+        <div class="status-line"><span id="status">Waiting…</span><span id="percent"></span></div>
+        <div class="bar"><span id="bar"></span></div>
+      </section>
+
+      <section id="result" class="result hidden">
+        <div class="result-head">
+          <h2>Transcript</h2>
+          <div><button id="copy">Copy</button><button id="download">Download</button></div>
+        </div>
+        <textarea id="transcript" readonly></textarea>
+      </section>
+    </main>
+  </body>
+</html>

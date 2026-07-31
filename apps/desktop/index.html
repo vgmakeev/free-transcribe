@@ -25,10 +25,13 @@
         <label>
           Profile
           <select id="engine">
-            <option value="qwen">Quality · Qwen</option>
+            <option value="qwen-quality">Best quality · Qwen 1.7B</option>
+            <option value="qwen-compact">Compact · Qwen 0.6B</option>
             <option value="parakeet">Fast · Parakeet</option>
           </select>
         </label>
+
+        <div class="profile-info" id="profile-info"></div>
 
         <label class="switch-row">
           <span>
@@ -48,6 +51,13 @@
         <button id="cancel" type="button" class="quiet hidden">Cancel</button>
         <button id="open-result" type="button" class="quiet hidden">Open result</button>
       </div>
+
+      <ol id="stages" class="stages" aria-label="Progress">
+        <li data-step="model"><span>1</span>Model</li>
+        <li data-step="transcription"><span>2</span>Text</li>
+        <li data-step="speakers"><span>3</span>Speakers</li>
+        <li data-step="done"><span>4</span>Done</li>
+      </ol>
 
       <section id="status" class="status" aria-live="polite">
         <div class="status-line">

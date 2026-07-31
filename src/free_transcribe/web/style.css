@@ -1,0 +1,21 @@
+:root { color: #1d1e21; background: #f3f1ec; font: 15px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 15% 0, #fff, transparent 32%), #f3f1ec; }
+main { width: min(720px, calc(100% - 32px)); margin: auto; padding: 38px 0 70px; }
+header { display: flex; align-items: center; gap: 13px; margin-bottom: 22px; }
+.mark { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 13px; color: #fff; background: #1d1e21; font: 700 17px ui-monospace, monospace; }
+h1, h2, p { margin: 0; } h1 { font-size: 22px; letter-spacing: -.03em; } h2 { font-size: 16px; } p, small { color: #77746d; }
+.card, .progress-panel, .result { padding: 20px; border: 1px solid #dedbd4; border-radius: 20px; background: rgba(255,255,255,.72); box-shadow: 0 10px 35px rgba(28,25,20,.04); }
+.auth { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; font-size: 13px; }
+button, input, select, textarea { font: inherit; }
+input, select { max-width: 62%; padding: 9px 11px; border: 0; border-radius: 10px; color: inherit; background: #eceae5; }
+.drop { width: 100%; min-height: 185px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; border: 1.5px dashed #b8b4ab; border-radius: 16px; color: #77746d; background: #faf9f6; cursor: pointer; transition: .15s ease; }
+.drop strong { color: #242529; font-size: 17px; }.drop.dragging { border-color: #292a2d; transform: translateY(-2px); }.drop.selected { border-style: solid; border-color: #8ab194; background: #f4fff6; }
+.options { margin: 16px 0; }.options > label { min-height: 50px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e5e2dc; }.options > small { display: block; padding: 7px 0 12px; font-size: 11px; }.switch small { display: block; font-size: 11px; }.switch input { width: 36px; height: 21px; accent-color: #242529; }
+.primary { width: 100%; height: 46px; border: 0; border-radius: 12px; color: #fff; background: #1d1e21; font-weight: 650; cursor: pointer; }.primary:disabled { opacity: .35; cursor: default; }
+.progress-panel, .result { margin-top: 16px; }.stages { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 0 0 20px; padding: 0; list-style: none; }.stages li { display: flex; align-items: center; gap: 5px; color: #aaa69e; font-size: 10px; }.stages li span { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid #cbc7be; border-radius: 50%; }.stages .active { color: #242529; font-weight: 650; }.stages .active span { color: #fff; border-color: #242529; background: #242529; }.stages .complete { color: #51705a; }.stages .complete span { color: transparent; border-color: #83ad8d; background: #dceade; }.stages .complete span::after { content: "✓"; color: #31523a; }
+.status-line { display: flex; justify-content: space-between; color: #69665f; font-size: 12px; }.bar { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 9px; background: #dfdcd5; }.bar span { display: block; width: 0; height: 100%; background: #252629; transition: width .2s ease; }.bar span.indeterminate { width: 35%; animation: progress 1.4s ease-in-out infinite alternate; }
+.result-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }.result-head button { padding: 7px 11px; border: 0; border-radius: 9px; background: #e8e5df; cursor: pointer; }.result textarea { width: 100%; min-height: 360px; resize: vertical; padding: 14px; border: 1px solid #dfdcd5; border-radius: 12px; color: #2b2c2f; background: #faf9f6; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.hidden { display: none !important; }
+@keyframes progress { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media (max-width: 560px) { main { width: calc(100% - 20px); padding-top: 20px; }.card, .progress-panel, .result { padding: 15px; }.stages li { flex-direction: column; align-items: flex-start; }.drop { min-height: 150px; } }

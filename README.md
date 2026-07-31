@@ -85,14 +85,19 @@ downloaded only when their installation profile or engine needs them.
 
 ## Python HTTP backend
 
-The API is another optional adapter over the same Python library. It accepts
-uploads, queues inference in the background, reports progress, and returns the
-same Markdown as the CLI. One worker is the safe default for a single GPU.
+The API is another optional adapter over the same Python library. Its built-in
+web UI at `/` accepts drag-and-drop uploads, shows upload/model/ASR/diarization
+progress, and can copy or download the final transcript. The same operations
+remain available as JSON endpoints under `/v1` and OpenAPI at `/docs`.
+
+One worker is the safe default for a single GPU. Additional requests wait in a
+bounded in-process queue and receive a queue position; a full queue returns
+HTTP `429` with `Retry-After` instead of overcommitting GPU memory.
 
 ```bash
 uv tool install "free-transcribe[api,quality] @ git+https://github.com/vgmakeev/free-transcribe.git"
 
-# Local-only development server and OpenAPI UI at /docs
+# Local-only development server; web UI at / and OpenAPI at /docs
 ft serve
 
 # Network deployment must be authenticated
@@ -110,11 +115,31 @@ curl -H "Authorization: Bearer $FT_API_TOKEN" \
   http://localhost:8000/v1/transcriptions/JOB_ID
 ```
 
-Environment controls: `FT_API_CONCURRENCY` (default `1`) and
-`FT_MAX_UPLOAD_MB` (default `4096`). Jobs and uploads are local and ephemeral;
-they are removed explicitly with `DELETE /v1/transcriptions/{id}` or when the
-server stops. Use a reverse proxy for TLS and persistent external job storage
-if deploying more than one API process.
+Environment controls: `FT_API_CONCURRENCY` (default `1`), `FT_API_MAX_QUEUE`
+(default `20` waiting jobs), and `FT_MAX_UPLOAD_MB` (default `4096`). Jobs and
+uploads are local and ephemeral; they are removed explicitly with
+`DELETE /v1/transcriptions/{id}` or when the server stops. Use a reverse proxy
+for TLS. Multiple API replicas need a shared queue such as Redis instead of the
+built-in single-process queue.
+
+### Ubuntu + NVIDIA CUDA container
+
+The host needs a recent NVIDIA driver, Docker, Docker Compose, and NVIDIA
+Container Toolkit. CUDA user-space libraries and Python 3.14 are included in
+the image; the model cache persists in a Docker volume.
+
+```bash
+export FT_API_TOKEN="$(openssl rand -hex 32)"
+export HF_TOKEN='your-hugging-face-token'  # required for pyannote speakers
+docker compose -f compose.cuda.yaml up -d --build
+
+curl http://localhost:8000/health
+docker compose -f compose.cuda.yaml logs -f api
+```
+
+Compose reserves one NVIDIA GPU, refuses startup when CUDA is unavailable, and
+keeps `FT_API_CONCURRENCY=1` by default. Set `FT_API_MAX_QUEUE` to cap waiting
+work. Put TLS/auth rate limiting in a reverse proxy before exposing it publicly.
 
 ## CLI
 

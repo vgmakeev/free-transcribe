@@ -48,3 +48,12 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: cargo check --manifest-path src-tauri/Cargo.toml
+
+  container-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate CUDA Compose configuration
+        env:
+          FT_API_TOKEN: ci-only-token
+        run: docker compose -f compose.cuda.yaml config --quiet

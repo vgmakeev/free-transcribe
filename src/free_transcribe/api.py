@@ -14,6 +14,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .core import (
@@ -23,6 +24,8 @@ from .core import (
     save_transcript,
     transcribe_file,
 )
+
+WEB_ROOT = Path(__file__).with_name("web")
 
 
 def _now() -> str:
@@ -69,6 +72,8 @@ def create_app(
     token: str | None = None,
     concurrency: int | None = None,
     max_upload_mb: int | None = None,
+    max_queue: int | None = None,
+    require_cuda: bool | None = None,
 ) -> FastAPI:
     """Create a self-contained API app; model dependencies remain lazy."""
     configured_token = token if token is not None else os.getenv("FT_API_TOKEN", "")
@@ -83,17 +88,40 @@ def create_app(
         else int(os.getenv("FT_MAX_UPLOAD_MB", "4096"))
     )
     upload_limit = upload_mb * 1024 * 1024
+    queue_limit = (
+        max_queue
+        if max_queue is not None
+        else int(os.getenv("FT_API_MAX_QUEUE", "20"))
+    )
+    cuda_required = (
+        require_cuda
+        if require_cuda is not None
+        else os.getenv("FT_REQUIRE_CUDA", "").casefold() in {"1", "true", "yes"}
+    )
     if worker_count < 1:
         raise ValueError("API concurrency must be at least 1")
     if upload_limit < 1:
         raise ValueError("upload limit must be positive")
+    if queue_limit < 0:
+        raise ValueError("queue limit cannot be negative")
 
     jobs: dict[str, _Job] = {}
     tasks: dict[str, asyncio.Task[None]] = {}
     inference_slots = asyncio.Semaphore(worker_count)
+    admission_lock = asyncio.Lock()
+    uploads_in_progress = 0
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if cuda_required:
+            try:
+                import torch
+            except ImportError as exc:
+                raise RuntimeError("FT_REQUIRE_CUDA is set but PyTorch is missing") from exc
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "FT_REQUIRE_CUDA is set but no NVIDIA CUDA device is available"
+                )
         yield
         for task in tasks.values():
             task.cancel()
@@ -107,6 +135,18 @@ def create_app(
         redoc_url=None,
         lifespan=lifespan,
     )
+    app.mount("/assets", StaticFiles(directory=WEB_ROOT), name="web-assets")
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if request.url.path == "/":
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; style-src 'self'; script-src 'self'; "
+                "connect-src 'self'; img-src 'self' blob:"
+            )
+        return response
 
     async def authorize(request: Request) -> None:
         if configured_token and not hmac.compare_digest(
@@ -120,10 +160,23 @@ def create_app(
             raise HTTPException(status_code=404, detail="Transcription not found")
         return job
 
+    def public_job(job: _Job) -> dict[str, Any]:
+        payload = job.public()
+        if job.status == "queued":
+            waiting = [candidate for candidate in jobs.values() if candidate.status == "queued"]
+            position = waiting.index(job) + 1
+            payload["queue_position"] = position
+            payload["progress"] = {
+                "stage": "queued",
+                "message": f"Queued · position {position}",
+            }
+        return payload
+
     async def execute(
         job: _Job,
         *,
         engine: str,
+        model: str | None,
         language: str | None,
         prompt: str | None,
         speakers: bool,
@@ -141,6 +194,7 @@ def create_app(
                 result = await asyncio.to_thread(
                     transcribe_file,
                     str(job.source_path),
+                    model_name=model,
                     language=language,
                     prompt=prompt,
                     on_progress=progress,
@@ -171,13 +225,25 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
+        queued = sum(job.status == "queued" for job in jobs.values())
+        running = sum(job.status == "running" for job in jobs.values())
         return {
             "status": "ok",
             "service": "free-transcribe",
             "version": __version__,
             "authentication": bool(configured_token),
             "concurrency": worker_count,
+            "cuda_required": cuda_required,
+            "queue": {
+                "queued": queued,
+                "running": running,
+                "max_waiting": queue_limit,
+            },
         }
+
+    @app.get("/", include_in_schema=False, response_class=FileResponse)
+    async def web_ui() -> FileResponse:
+        return FileResponse(WEB_ROOT / "index.html", media_type="text/html")
 
     @app.post(
         "/v1/transcriptions",
@@ -187,11 +253,13 @@ def create_app(
     async def submit(
         file: Annotated[UploadFile, File()],
         engine: Annotated[str, Form()] = DEFAULT_ENGINE,
+        model: Annotated[str | None, Form()] = None,
         language: Annotated[str | None, Form()] = None,
         prompt: Annotated[str | None, Form()] = None,
         speakers: Annotated[bool, Form()] = False,
         speaker_count: Annotated[int | None, Form()] = None,
     ) -> dict[str, Any]:
+        nonlocal uploads_in_progress
         engine = engine.casefold()
         if engine not in AVAILABLE_ENGINES:
             raise HTTPException(
@@ -204,6 +272,19 @@ def create_app(
         suffix = Path(file.filename or "").suffix.casefold()
         if suffix not in SUPPORTED_FORMATS:
             raise HTTPException(status_code=415, detail="Unsupported media format")
+
+        async with admission_lock:
+            active = sum(
+                job.status in {"queued", "running"} for job in jobs.values()
+            )
+            if active + uploads_in_progress >= worker_count + queue_limit:
+                await file.close()
+                raise HTTPException(
+                    status_code=429,
+                    detail="Transcription queue is full",
+                    headers={"Retry-After": "30"},
+                )
+            uploads_in_progress += 1
 
         job_id = uuid.uuid4().hex
         work_dir = Path(tempfile.mkdtemp(prefix=f"free-transcribe-{job_id}-"))
@@ -218,11 +299,15 @@ def create_app(
                     output.write(chunk)
         except Exception:
             shutil.rmtree(work_dir, ignore_errors=True)
+            async with admission_lock:
+                uploads_in_progress -= 1
             raise
         finally:
             await file.close()
         if size == 0:
             shutil.rmtree(work_dir, ignore_errors=True)
+            async with admission_lock:
+                uploads_in_progress -= 1
             raise HTTPException(status_code=422, detail="Upload is empty")
 
         job = _Job(
@@ -232,10 +317,13 @@ def create_app(
             created_at=_now(),
         )
         jobs[job_id] = job
+        async with admission_lock:
+            uploads_in_progress -= 1
         task = asyncio.create_task(
             execute(
                 job,
                 engine=engine,
+                model=model,
                 language=language,
                 prompt=prompt,
                 speakers=speakers or speaker_count is not None,
@@ -244,11 +332,11 @@ def create_app(
         )
         tasks[job_id] = task
         task.add_done_callback(lambda _task: tasks.pop(job_id, None))
-        return job.public()
+        return public_job(job)
 
     @app.get("/v1/transcriptions/{job_id}", dependencies=[Depends(authorize)])
     async def status(job_id: str) -> dict[str, Any]:
-        return find_job(job_id).public()
+        return public_job(find_job(job_id))
 
     @app.get(
         "/v1/transcriptions/{job_id}/result",

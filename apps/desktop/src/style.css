@@ -51,6 +51,7 @@ button:disabled, select:disabled, input:disabled { cursor: default; opacity: .45
 }
 .options label { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e5e2dc; font-size: 14px; }
 .options label:last-child { border-bottom: 0; }
+.profile-info { margin: -3px 0 3px; padding: 0 0 11px; color: #85817a; font-size: 11px; line-height: 1.35; }
 select, input[type="number"] { border: 0; border-radius: 9px; padding: 8px 10px; color: #28292c; background: #eceae5; outline: none; }
 small { display: block; margin-top: 2px; color: #89867f; font-size: 11px; font-weight: 400; }
 input[type="checkbox"] { width: 35px; height: 20px; accent-color: #202124; }
@@ -61,6 +62,15 @@ input[type="number"] { width: 72px; }
 .primary { flex: 1; color: #fff; background: #1d1e21; }
 .primary:disabled { cursor: default; opacity: .35; }
 .quiet { color: #333438; background: #e5e2dc; }
+
+.stages { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 18px 0 0; padding: 0; list-style: none; }
+.stages li { display: flex; align-items: center; gap: 5px; color: #aaa69e; font-size: 10px; }
+.stages span { display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid #cfcbc3; border-radius: 50%; font-size: 9px; }
+.stages li.active { color: #292a2d; font-weight: 650; }
+.stages li.active span { color: #fff; border-color: #292a2d; background: #292a2d; }
+.stages li.complete { color: #51705a; }
+.stages li.complete span { color: transparent; border-color: #83ad8d; background: #dceade; }
+.stages li.complete span::after { content: "✓"; color: #31523a; }
 
 .status { margin-top: 19px; }
 .status-line { display: flex; justify-content: space-between; color: #65625c; font-size: 12px; }
@@ -81,4 +91,6 @@ pre { max-height: 92px; overflow: auto; margin: 13px 0 0; color: #85817a; font: 
   .options label { border-color: #3b3c3f; }
   select, input[type="number"], .quiet { color: #eee; background: #333438; }
   .primary { color: #191a1d; background: #efeee9; }
+  .stages li.active { color: #f1f0ed; }
+  .stages li.active span { color: #17181a; border-color: #efeee9; background: #efeee9; }
 }

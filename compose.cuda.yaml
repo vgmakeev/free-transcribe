@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.cuda
+    image: free-transcribe:cuda
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${FT_API_PORT:-8000}:8000"
+    environment:
+      FT_API_TOKEN: "${FT_API_TOKEN:?set FT_API_TOKEN in the environment}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      FT_API_CONCURRENCY: "${FT_API_CONCURRENCY:-1}"
+      FT_API_MAX_QUEUE: "${FT_API_MAX_QUEUE:-20}"
+      FT_MAX_UPLOAD_MB: "${FT_MAX_UPLOAD_MB:-4096}"
+    volumes:
+      - model-cache:/models
+    shm_size: "2gb"
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  model-cache:

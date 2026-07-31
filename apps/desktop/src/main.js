@@ -4,6 +4,27 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import { Command } from "@tauri-apps/plugin-shell";
 import "./style.css";
 
+const PROFILES = {
+  "qwen-quality": {
+    engine: "qwen",
+    model: null,
+    size: "4.7 GB",
+    note: "best accuracy",
+  },
+  "qwen-compact": {
+    engine: "qwen",
+    model: "Qwen/Qwen3-ASR-0.6B",
+    size: "1.9 GB",
+    note: "smaller download",
+  },
+  parakeet: {
+    engine: "parakeet",
+    model: null,
+    size: "2.5 GB",
+    note: "fastest on Apple Silicon",
+  },
+};
+
 const $ = (selector) => document.querySelector(selector);
 const elements = {
   drop: $("#drop"),
@@ -16,6 +37,8 @@ const elements = {
   cancel: $("#cancel"),
   openResult: $("#open-result"),
   runtime: $("#runtime"),
+  profileInfo: $("#profile-info"),
+  stages: $("#stages"),
   status: $("#status"),
   statusText: $("#status-text"),
   elapsed: $("#elapsed"),
@@ -34,6 +57,26 @@ let speakerReady = false;
 
 function refreshStart() {
   elements.start.disabled = !runtimeReady || !mediaPath || Boolean(child);
+}
+
+function selectedProfile() {
+  return PROFILES[elements.engine.value];
+}
+
+function refreshProfileInfo() {
+  const profile = selectedProfile();
+  const alignment = elements.speakers.checked && profile.engine === "qwen"
+    ? " · +1.8 GB speaker aligner"
+    : "";
+  elements.profileInfo.textContent = `First use: ~${profile.size}${alignment} · ${profile.note}. Cached afterward.`;
+}
+
+function setStage(active, completed = []) {
+  for (const item of elements.stages.querySelectorAll("li")) {
+    const step = item.dataset.step;
+    item.classList.toggle("active", step === active);
+    item.classList.toggle("complete", completed.includes(step));
+  }
 }
 
 function fileName(path) {
@@ -60,7 +103,7 @@ function setRunning(running) {
   elements.start.classList.toggle("hidden", running);
   elements.cancel.classList.toggle("hidden", !running);
   elements.drop.disabled = running;
-  elements.engine.disabled = running;
+  elements.engine.disabled = running || !runtimeReady;
   elements.speakers.disabled = running || !speakerReady;
   elements.progressBar.classList.toggle("active", running);
   if (running) {
@@ -95,11 +138,11 @@ async function checkRuntime() {
     const doctor = JSON.parse(output.stdout);
     const engines = ["qwen", "parakeet"];
     const available = engines.filter((name) => doctor.ready[name]);
-    for (const name of engines) {
-      elements.engine.querySelector(`option[value="${name}"]`).disabled = !doctor.ready[name];
+    for (const option of elements.engine.options) {
+      option.disabled = !doctor.ready[PROFILES[option.value].engine];
     }
-    if (!doctor.ready[elements.engine.value] && available.length) {
-      elements.engine.value = available[0];
+    if (!doctor.ready[selectedProfile().engine] && available.length) {
+      elements.engine.value = available[0] === "qwen" ? "qwen-quality" : "parakeet";
     }
     runtimeReady = available.length > 0;
     speakerReady = Boolean(doctor.ready.speaker_transcription);
@@ -118,11 +161,14 @@ async function checkRuntime() {
     elements.runtime.textContent = "Install the free-transcribe backend first";
   }
   refreshStart();
+  refreshProfileInfo();
 }
 
 async function transcribe() {
   if (!mediaPath || child) return;
-  const args = [mediaPath, "--engine", elements.engine.value];
+  const profile = selectedProfile();
+  const args = [mediaPath, "--engine", profile.engine];
+  if (profile.model) args.push("--model", profile.model);
   if (elements.speakers.checked) {
     const count = elements.speakerCount.value.trim();
     args.push("--speakers");
@@ -135,6 +181,7 @@ async function transcribe() {
   elements.statusText.textContent = "Starting…";
   elements.elapsed.textContent = "0:00";
   elements.progressBar.style.width = "";
+  setStage("model");
   elements.openResult.classList.add("hidden");
   setRunning(true);
 
@@ -144,7 +191,31 @@ async function transcribe() {
     stderrLines.push(line.trim());
     appendLog(line);
     const match = line.match(/^\[([^\]]+)\]\s+(.*)$/);
-    if (match) elements.statusText.textContent = match[2];
+    if (match) {
+      const [stage, message] = match.slice(1);
+      elements.statusText.textContent = message;
+      if (["device", "loading"].includes(stage)) setStage("model");
+      if (stage === "transcribing") {
+        setStage("transcription", ["model"]);
+        elements.progressBar.style.width = "";
+        elements.progressBar.classList.add("active");
+      }
+      if (["diarization_loading", "diarizing"].includes(stage)) {
+        setStage("speakers", ["model", "transcription"]);
+        elements.progressBar.style.width = "";
+        elements.progressBar.classList.add("active");
+      }
+      if (stage === "complete") {
+        setStage("done", ["model", "transcription", "speakers"]);
+      }
+    }
+    const download = line.match(/(?:Fetching|Downloading).*?\b(\d{1,3})%/i);
+    if (download) {
+      const percent = Math.min(100, Number(download[1]));
+      elements.statusText.textContent = `Downloading model… ${percent}%`;
+      elements.progressBar.classList.remove("active");
+      elements.progressBar.style.width = `${percent}%`;
+    }
   });
   command.on("error", (error) => {
     elements.statusText.textContent = String(error);
@@ -157,6 +228,7 @@ async function transcribe() {
     if (code === 0) {
       resultPath = [...stderrLines].reverse().find((line) => line.toLowerCase().endsWith(".md")) ?? null;
       elements.statusText.textContent = "Complete";
+      setStage("done", ["model", "transcription", "speakers", "done"]);
       elements.progressBar.style.width = "100%";
       elements.openResult.classList.toggle("hidden", !resultPath);
     } else {
@@ -178,7 +250,9 @@ elements.cancel.addEventListener("click", async () => child?.kill());
 elements.openResult.addEventListener("click", () => resultPath && openPath(resultPath));
 elements.speakers.addEventListener("change", () => {
   elements.countRow.classList.toggle("hidden", !elements.speakers.checked);
+  refreshProfileInfo();
 });
+elements.engine.addEventListener("change", refreshProfileInfo);
 
 await getCurrentWebview().onDragDropEvent((event) => {
   elements.drop.classList.toggle("dragging", event.payload.type === "over");
@@ -187,4 +261,5 @@ await getCurrentWebview().onDragDropEvent((event) => {
   }
 });
 
+refreshProfileInfo();
 checkRuntime();

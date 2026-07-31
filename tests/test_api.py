@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,15 @@ except ImportError:
 
 @unittest.skipIf(TestClient is None, "API dependencies are not installed")
 class ApiTests(unittest.TestCase):
+    def test_web_ui_is_served(self):
+        app = create_app()
+        with TestClient(app) as client:
+            response = client.get("/")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Free Transcribe", response.text)
+            self.assertIn("default-src 'self'", response.headers["content-security-policy"])
+            self.assertEqual(client.get("/assets/app.js").status_code, 200)
+
     def test_authenticated_background_transcription(self):
         result = TranscriptResult(
             text="Привет",
@@ -65,6 +75,54 @@ class ApiTests(unittest.TestCase):
                 ).status_code,
                 204,
             )
+
+    def test_queue_position_and_capacity(self):
+        result = TranscriptResult(
+            text="Queued result",
+            segments=[TranscriptSegment(0.0, 1.0, "Queued result")],
+            language="en",
+            duration_min=1 / 60,
+            device="test",
+            model="test/model",
+        )
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_transcription(*_args, **_kwargs):
+            started.set()
+            release.wait(timeout=3)
+            return result
+
+        app = create_app(concurrency=1, max_queue=1)
+        with (
+            patch(
+                "free_transcribe.api.transcribe_file",
+                side_effect=blocking_transcription,
+            ),
+            TestClient(app) as client,
+        ):
+            first = client.post(
+                "/v1/transcriptions", files={"file": ("first.wav", b"audio")}
+            )
+            self.assertEqual(first.status_code, 202)
+            self.assertTrue(started.wait(timeout=1))
+
+            second = client.post(
+                "/v1/transcriptions", files={"file": ("second.wav", b"audio")}
+            )
+            self.assertEqual(second.status_code, 202)
+            second_status = client.get(
+                f"/v1/transcriptions/{second.json()['id']}"
+            ).json()
+            self.assertEqual(second_status["status"], "queued")
+            self.assertEqual(second_status["queue_position"], 1)
+
+            rejected = client.post(
+                "/v1/transcriptions", files={"file": ("third.wav", b"audio")}
+            )
+            self.assertEqual(rejected.status_code, 429)
+            self.assertEqual(rejected.headers["retry-after"], "30")
+            release.set()
 
 
 if __name__ == "__main__":
