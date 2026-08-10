@@ -13,6 +13,7 @@ from free_transcribe.core import (
     TranscriptResult,
     TranscriptSegment,
     TranscriptWord,
+    _chunked_audio_paths,
     _combine_context,
     _EngineOutput,
     _load_hotwords,
@@ -695,3 +696,34 @@ class QwenCudaContextTests(unittest.TestCase):
             )
 
         self.assertEqual(captured.get("context"), "Kafka\ngRPC")
+
+
+class ChunkFormatTests(unittest.TestCase):
+    """Long-form chunks must carry a readable sample count in the header.
+
+    The `segment` muxer writes each part without seeking back, so a FLAC
+    chunk keeps an unknown sample count. Lhotse then reads it as 2**63-1,
+    discards the chunk as inconsistent, and NeMo ends up with nothing to
+    transcribe.
+    """
+
+    def test_chunks_are_written_as_wav(self):
+        captured: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            captured.append(command)
+            directory = Path(command[-1]).parent
+            (directory / "chunk-0000.wav").write_bytes(b"")
+            return SimpleNamespace(returncode=0)
+
+        with (
+            patch("free_transcribe.core._media_duration_seconds", return_value=900.0),
+            patch("free_transcribe.core.subprocess.run", side_effect=fake_run),
+            _chunked_audio_paths("meeting.webm", chunk_duration=300) as chunks,
+        ):
+            self.assertEqual(len(chunks), 1)
+            self.assertTrue(chunks[0][0].endswith(".wav"))
+
+        command = captured[0]
+        self.assertIn("pcm_s16le", command)
+        self.assertNotIn("flac", command)

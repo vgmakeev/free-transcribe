@@ -786,7 +786,7 @@ def _chunked_audio_paths(file_path: str, chunk_duration: int = 300):
         return
 
     with tempfile.TemporaryDirectory(prefix="free-transcribe-chunks-") as directory:
-        pattern = str(Path(directory) / "chunk-%04d.flac")
+        pattern = str(Path(directory) / "chunk-%04d.wav")
         try:
             subprocess.run(
                 [
@@ -802,7 +802,7 @@ def _chunked_audio_paths(file_path: str, chunk_duration: int = 300):
                     "-ar",
                     "16000",
                     "-c:a",
-                    "flac",
+                    "pcm_s16le",
                     "-f",
                     "segment",
                     "-segment_time",
@@ -818,7 +818,7 @@ def _chunked_audio_paths(file_path: str, chunk_duration: int = 300):
             raise RuntimeError("ffmpeg is required for long-form transcription") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError("Could not split long audio for transcription") from exc
-        paths = sorted(Path(directory).glob("chunk-*.flac"))
+        paths = sorted(Path(directory).glob("chunk-*.wav"))
         if not paths:
             raise RuntimeError("ffmpeg produced no audio chunks")
         yield [(str(path), index * float(chunk_duration)) for index, path in enumerate(paths)]
