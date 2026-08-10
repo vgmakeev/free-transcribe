@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -15,10 +16,12 @@ from free_transcribe.core import (
     _EngineOutput,
     _normalized_audio_path,
     _pyannote_progress_hook,
+    _qwen_batch_ladder,
     _transcribe_parakeet,
     _transcribe_parakeet_cuda,
     _transcribe_qwen,
     _transcribe_qwen_mlx,
+    _transcribe_qwen_torch,
     assign_speakers_to_words,
     format_timestamp,
     restore_segment_punctuation,
@@ -503,3 +506,110 @@ class TranscriptionPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QwenBatchLadderTests(unittest.TestCase):
+    def test_default_ladder_halves_down_to_one(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FT_QWEN_BATCH", None)
+            self.assertEqual(_qwen_batch_ladder(), [8, 4, 2, 1])
+
+    def test_environment_overrides_starting_batch(self):
+        with patch.dict(os.environ, {"FT_QWEN_BATCH": "4"}):
+            self.assertEqual(_qwen_batch_ladder(), [4, 2, 1])
+
+    def test_non_numeric_value_falls_back_to_default(self):
+        with patch.dict(os.environ, {"FT_QWEN_BATCH": "many"}):
+            self.assertEqual(_qwen_batch_ladder(), [8, 4, 2, 1])
+
+    def test_ladder_never_goes_below_one(self):
+        with patch.dict(os.environ, {"FT_QWEN_BATCH": "0"}):
+            self.assertEqual(_qwen_batch_ladder(), [1])
+
+
+class QwenCudaRetryTests(unittest.TestCase):
+    def _fake_torch(self, oom_error):
+        cuda = SimpleNamespace(
+            is_available=lambda: True,
+            empty_cache=lambda: None,
+            OutOfMemoryError=oom_error,
+        )
+        return SimpleNamespace(bfloat16="bfloat16", cuda=cuda)
+
+    def test_retries_with_smaller_batch_after_out_of_memory(self):
+        class FakeOutOfMemoryError(RuntimeError):
+            pass
+
+        attempted: list[int] = []
+
+        class FakeModel:
+            def __init__(self, batch_size):
+                self.batch_size = batch_size
+
+            def transcribe(self, **kwargs):
+                if self.batch_size > 4:
+                    raise FakeOutOfMemoryError("CUDA out of memory")
+                return [
+                    SimpleNamespace(text="Hello", time_stamps=[], language="English")
+                ]
+
+        def from_pretrained(model_name, **options):
+            attempted.append(options["max_inference_batch_size"])
+            return FakeModel(options["max_inference_batch_size"])
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "torch": self._fake_torch(FakeOutOfMemoryError),
+                    "qwen_asr": SimpleNamespace(
+                        Qwen3ASRModel=SimpleNamespace(from_pretrained=from_pretrained)
+                    ),
+                },
+            ),
+            patch("free_transcribe.core._media_duration_seconds", return_value=1.0),
+            patch.dict(os.environ, {"FT_QWEN_BATCH": "8"}),
+        ):
+            result = _transcribe_qwen_torch(
+                "meeting.wav",
+                model_name="test/model",
+                language=None,
+                context=None,
+                need_words=False,
+            )
+
+        self.assertEqual(attempted, [8, 4])
+        self.assertEqual(result.text, "Hello")
+
+    def test_reports_failure_when_even_batch_of_one_does_not_fit(self):
+        class FakeOutOfMemoryError(RuntimeError):
+            pass
+
+        class AlwaysFailingModel:
+            def transcribe(self, **kwargs):
+                raise FakeOutOfMemoryError("CUDA out of memory")
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "torch": self._fake_torch(FakeOutOfMemoryError),
+                    "qwen_asr": SimpleNamespace(
+                        Qwen3ASRModel=SimpleNamespace(
+                            from_pretrained=lambda *a, **k: AlwaysFailingModel()
+                        )
+                    ),
+                },
+            ),
+            patch.dict(os.environ, {"FT_QWEN_BATCH": "2"}),
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            _transcribe_qwen_torch(
+                "meeting.wav",
+                model_name="test/model",
+                language=None,
+                context=None,
+                need_words=False,
+            )
+
+        self.assertIn("batch size of 1", str(caught.exception))
