@@ -13,7 +13,9 @@ from free_transcribe.core import (
     TranscriptResult,
     TranscriptSegment,
     TranscriptWord,
+    _combine_context,
     _EngineOutput,
+    _load_hotwords,
     _normalized_audio_path,
     _pyannote_progress_hook,
     _qwen_batch_ladder,
@@ -613,3 +615,83 @@ class QwenCudaRetryTests(unittest.TestCase):
             )
 
         self.assertIn("batch size of 1", str(caught.exception))
+
+
+class HotwordsTests(unittest.TestCase):
+    def _write(self, content: str) -> str:
+        directory = tempfile.mkdtemp()
+        path = Path(directory) / "glossary.txt"
+        path.write_text(content, encoding="utf-8")
+        return str(path)
+
+    def test_reads_one_term_per_line(self):
+        path = self._write("Kubernetes\nClickHouse\n")
+        self.assertEqual(_load_hotwords(path), "Kubernetes\nClickHouse")
+
+    def test_skips_comments_and_blank_lines(self):
+        path = self._write("# glossary\n\nKafka\n\n  gRPC  \n")
+        self.assertEqual(_load_hotwords(path), "Kafka\ngRPC")
+
+    def test_missing_file_is_not_an_error(self):
+        self.assertEqual(_load_hotwords("/nonexistent/glossary.txt"), "")
+
+    def test_falls_back_to_environment_variable(self):
+        path = self._write("Redis\n")
+        with patch.dict(os.environ, {"FT_HOTWORDS_FILE": path}):
+            self.assertEqual(_load_hotwords(), "Redis")
+
+    def test_prompt_comes_before_glossary(self):
+        path = self._write("Kafka\n")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FT_HOTWORDS_FILE", None)
+            self.assertEqual(_combine_context("Anna", path), "Anna\nKafka")
+
+    def test_without_prompt_or_glossary_context_is_none(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FT_HOTWORDS_FILE", None)
+            self.assertIsNone(_combine_context(None, None))
+
+
+class QwenCudaContextTests(unittest.TestCase):
+    def test_context_reaches_the_cuda_backend(self):
+        captured: dict[str, object] = {}
+
+        class FakeModel:
+            def transcribe(self, **kwargs):
+                captured.update(kwargs)
+                return [
+                    SimpleNamespace(text="Hello", time_stamps=[], language="English")
+                ]
+
+        fake_torch = SimpleNamespace(
+            bfloat16="bfloat16",
+            cuda=SimpleNamespace(
+                is_available=lambda: True,
+                empty_cache=lambda: None,
+                OutOfMemoryError=RuntimeError,
+            ),
+        )
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "torch": fake_torch,
+                    "qwen_asr": SimpleNamespace(
+                        Qwen3ASRModel=SimpleNamespace(
+                            from_pretrained=lambda *a, **k: FakeModel()
+                        )
+                    ),
+                },
+            ),
+            patch("free_transcribe.core._media_duration_seconds", return_value=1.0),
+        ):
+            _transcribe_qwen_torch(
+                "meeting.wav",
+                model_name="test/model",
+                language=None,
+                context="Kafka\ngRPC",
+                need_words=False,
+            )
+
+        self.assertEqual(captured.get("context"), "Kafka\ngRPC")

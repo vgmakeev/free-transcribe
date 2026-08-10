@@ -75,6 +75,38 @@ def _qwen_batch_ladder() -> list[int]:
     ladder.append(1)
     return ladder
 
+HOTWORDS_PATH_ENV = "FT_HOTWORDS_FILE"
+
+
+def _load_hotwords(path: str | None = None) -> str:
+    """Read a glossary file into a context string, one term per line.
+
+    The file is re-read per call so that editing the glossary takes effect on
+    the next transcription, which matters when the server runs as a service.
+    Blank lines and lines starting with `#` are ignored.
+
+    Terms are joined with newlines rather than commas on purpose. A
+    comma-separated list reads as continuable prose: once the audio contains a
+    word that appears in it, the model is prone to carry on reciting the list
+    instead of transcribing speech. One term per line does not have that
+    effect.
+    """
+    source = path or os.environ.get(HOTWORDS_PATH_ENV, "")
+    if not source:
+        return ""
+    try:
+        raw = Path(source).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    terms = [line.strip() for line in raw.splitlines()]
+    return "\n".join(term for term in terms if term and not term.startswith("#"))
+
+
+def _combine_context(prompt: str | None, hotwords_file: str | None) -> str | None:
+    """Merge the per-run prompt with the glossary, prompt first."""
+    parts = [part for part in (prompt or "", _load_hotwords(hotwords_file)) if part]
+    return "\n".join(parts) or None
+
 DEFAULT_FORCED_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 
 LANGUAGE_NAMES = {
@@ -578,11 +610,6 @@ def _transcribe_qwen_torch(
             }
         )
 
-    # Contextual prompting is currently an MLX-only feature. Keeping this
-    # argument in the adapter boundary makes it possible to add when the
-    # official Transformers backend exposes it.
-    del context
-
     ladder = _qwen_batch_ladder()
     results = None
     last_oom: str | None = None
@@ -592,6 +619,7 @@ def _transcribe_qwen_torch(
             model = Qwen3ASRModel.from_pretrained(model_name, **options)
             results = model.transcribe(
                 audio=file_path,
+                context=context or "",
                 language=_qwen_language(language),
                 return_time_stamps=need_words,
             )
@@ -1207,6 +1235,7 @@ def transcribe_file(
     prompt: str | None = None,
     on_progress: ProgressCallback | None = None,
     *,
+    hotwords_file: str | None = None,
     engine: str = DEFAULT_ENGINE,
     diarize: bool = False,
     diarization_model: str = DEFAULT_DIARIZATION_MODEL,
@@ -1241,7 +1270,7 @@ def transcribe_file(
             prepared_path,
             resolved_model=resolved_model,
             language=language,
-            prompt=prompt,
+            prompt=_combine_context(prompt, hotwords_file),
             on_progress=on_progress,
             engine=engine,
             diarize=diarize,

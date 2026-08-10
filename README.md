@@ -184,12 +184,28 @@ ft meeting.mp4 --speakers 3            # exact speaker count
 ft meeting.mp4 --speakers --names "Anna,Victor,Igor"
 ft meeting.mp4 --engine parakeet       # fast profile
 ft meeting.mp4 --prompt "1C MES литография"
+ft meeting.mp4 --hotwords-file glossary.txt   # recurring domain terms
 ft meeting.mp4 -o transcript.md
 ft meeting.mp4 -o -                    # Markdown to stdout
 ```
 
 `--speakers` runs pyannote after the selected ASR engine. Qwen additionally
 loads its ForcedAligner; Parakeet already supplies word timestamps.
+
+### Domain terms
+
+`--prompt` biases recognition towards names and jargon you expect. When the
+same terms come up in every recording, keep them in a file instead and pass
+`--hotwords-file glossary.txt` (the server reads `FT_HOTWORDS_FILE`). One term
+per line; blank lines and `#` comments are ignored, and the file is re-read per
+run, so editing it takes effect immediately. See `hotwords.example.txt`.
+
+Write one term per line rather than a comma-separated list. A comma-separated
+list reads as continuable prose: once the audio contains a word from it, the
+model tends to carry on reciting the list instead of transcribing speech.
+
+Contextual biasing applies to Qwen. Parakeet ignores it — mlx-audio does not
+expose contextual biasing yet.
 
 ## Agent pipeline
 

@@ -112,6 +112,7 @@ def _run_asr(args: argparse.Namespace) -> None:
         model_name=args.model,
         language=args.lang,
         prompt=args.prompt,
+        hotwords_file=args.hotwords_file,
         word_timestamps=args.timestamps == "word",
         on_progress=_progress,
     )
@@ -175,6 +176,7 @@ def _run_one_shot(args: argparse.Namespace) -> None:
         model_name=args.model,
         language=args.lang,
         prompt=args.prompt,
+        hotwords_file=args.hotwords_file,
         diarize=diarize,
         diarization_model=args.diarization_model,
         diarization_device=args.diarization_device,
@@ -269,6 +271,10 @@ def _add_asr_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("-l", "--lang", help="language code/name; auto if omitted")
     parser.add_argument("-p", "--prompt", help="known terms or names for Qwen")
+    parser.add_argument(
+        "--hotwords-file",
+        help="file with domain terms, one per line, appended to the prompt",
+    )
 
 
 def _add_speaker_options(parser: argparse.ArgumentParser) -> None:
