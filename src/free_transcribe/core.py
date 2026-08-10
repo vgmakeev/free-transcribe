@@ -47,6 +47,34 @@ DEFAULT_MODELS = {
 }
 DEFAULT_MODEL = DEFAULT_MODELS[DEFAULT_ENGINE]
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+
+QWEN_BATCH_ENV = "FT_QWEN_BATCH"
+DEFAULT_QWEN_BATCH = 8
+
+
+def _qwen_batch_ladder() -> list[int]:
+    """Batch sizes to try for the CUDA backend, largest first.
+
+    Peak VRAM grows with the batch size, and the ceiling depends on the card,
+    on the length of the recording and on whatever else shares the GPU, so no
+    single hard-coded value fits every setup. Stepping down and retrying makes
+    a long recording transcribe slower instead of failing with CUDA OOM.
+    """
+    raw = os.environ.get(QWEN_BATCH_ENV, "")
+    try:
+        start = int(raw) if raw else DEFAULT_QWEN_BATCH
+    except ValueError:
+        start = DEFAULT_QWEN_BATCH
+    start = max(1, start)
+
+    ladder: list[int] = []
+    size = start
+    while size > 1:
+        ladder.append(size)
+        size //= 2
+    ladder.append(1)
+    return ladder
+
 DEFAULT_FORCED_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
 
 LANGUAGE_NAMES = {
@@ -537,7 +565,6 @@ def _transcribe_qwen_torch(
     options: dict[str, Any] = {
         "dtype": torch.bfloat16,
         "device_map": device,
-        "max_inference_batch_size": 8,
         "max_new_tokens": 4096,
     }
     if need_words:
@@ -551,16 +578,37 @@ def _transcribe_qwen_torch(
             }
         )
 
-    model = Qwen3ASRModel.from_pretrained(model_name, **options)
     # Contextual prompting is currently an MLX-only feature. Keeping this
     # argument in the adapter boundary makes it possible to add when the
     # official Transformers backend exposes it.
     del context
-    results = model.transcribe(
-        audio=file_path,
-        language=_qwen_language(language),
-        return_time_stamps=need_words,
-    )
+
+    ladder = _qwen_batch_ladder()
+    results = None
+    last_oom: Exception | None = None
+    for batch_size in ladder:
+        options["max_inference_batch_size"] = batch_size
+        try:
+            model = Qwen3ASRModel.from_pretrained(model_name, **options)
+            results = model.transcribe(
+                audio=file_path,
+                language=_qwen_language(language),
+                return_time_stamps=need_words,
+            )
+            break
+        except torch.cuda.OutOfMemoryError as exc:
+            # Both the weights and the freed activations have to go before the
+            # next attempt, otherwise the retry hits the same ceiling.
+            last_oom = exc
+            model = None
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    if results is None:
+        raise RuntimeError(
+            "Qwen ran out of GPU memory even with a batch size of 1. "
+            "Free up VRAM or transcribe a shorter recording."
+        ) from last_oom
     if not results:
         raise RuntimeError("Qwen returned no transcription result")
     result = results[0]
@@ -1091,23 +1139,24 @@ def _transcribe_prepared(
     used_diarization_model: str | None = None
     segments = engine_output.segments
     if diarize:
-        if engine == "parakeet":
-            # The ASR model is no longer needed. Release Metal allocations
-            # before loading pyannote so peak memory is bounded by one model.
-            gc.collect()
-            try:
-                import mlx.core as mx
+        # The ASR model is no longer needed. Releasing it before pyannote is
+        # loaded keeps peak memory bounded by one model instead of the sum,
+        # which matters for every engine, not just Parakeet: on CUDA the Qwen
+        # weights plus the forced aligner are several gigabytes on their own.
+        gc.collect()
+        try:
+            import mlx.core as mx
 
-                mx.clear_cache()
-            except ImportError:
-                pass
-            try:
-                import torch
+            mx.clear_cache()
+        except ImportError:
+            pass
+        try:
+            import torch
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
         turns = diarize_file(
             file_path,
             model_name=diarization_model,

@@ -1,6 +1,7 @@
 """Optional HTTP API over the same local transcription core."""
 
 import asyncio
+import gc
 import hmac
 import importlib.util
 import json
@@ -97,6 +98,24 @@ def _bearer_token(request: Request) -> str:
     scheme, _, value = request.headers.get("authorization", "").partition(" ")
     return value if scheme.casefold() == "bearer" else ""
 
+
+
+def _release_gpu_memory() -> None:
+    """Return cached GPU memory to the driver once a job is done.
+
+    PyTorch keeps freed blocks in its allocator cache, so after a CUDA job the
+    process holds on to gigabytes that neither the next job nor other
+    processes on the same GPU can use. The weights themselves are already
+    unreachable at this point: the model is built per job.
+    """
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
 
 def create_app(
     *,
@@ -280,6 +299,7 @@ def create_app(
                 publish(job)
             finally:
                 job.completed_at = _now()
+                _release_gpu_memory()
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
