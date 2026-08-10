@@ -8,4 +8,3 @@ benchmark
 build
 dist
 tests
-uv.lock

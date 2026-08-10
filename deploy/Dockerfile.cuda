@@ -16,6 +16,7 @@ COPY --from=uv /uv /usr/local/bin/uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
+    cmake \
     ffmpeg \
     git \
     libsndfile1-dev \
@@ -46,6 +47,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
+    gcc \
+    libc6-dev \
     libgomp1 \
     libsndfile1 \
     sox \
