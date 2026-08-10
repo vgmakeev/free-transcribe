@@ -585,7 +585,7 @@ def _transcribe_qwen_torch(
 
     ladder = _qwen_batch_ladder()
     results = None
-    last_oom: Exception | None = None
+    last_oom: str | None = None
     for batch_size in ladder:
         options["max_inference_batch_size"] = batch_size
         try:
@@ -597,18 +597,24 @@ def _transcribe_qwen_torch(
             )
             break
         except torch.cuda.OutOfMemoryError as exc:
-            # Both the weights and the freed activations have to go before the
-            # next attempt, otherwise the retry hits the same ceiling.
-            last_oom = exc
+            # Keep the message, not the exception: holding the exception keeps
+            # its traceback, which keeps the frames, which keep the tensors
+            # allocated inside qwen-asr. With that reference alive
+            # `empty_cache()` frees almost nothing and every retry hits the
+            # same ceiling, so a batch of 1 fails just like a batch of 8.
+            last_oom = str(exc)
+            del exc
             model = None
+            results = None
             gc.collect()
             torch.cuda.empty_cache()
 
     if results is None:
         raise RuntimeError(
             "Qwen ran out of GPU memory even with a batch size of 1. "
-            "Free up VRAM or transcribe a shorter recording."
-        ) from last_oom
+            "Free up VRAM or transcribe a shorter recording. "
+            f"Last CUDA error: {last_oom or 'unknown'}"
+        )
     if not results:
         raise RuntimeError("Qwen returned no transcription result")
     result = results[0]
