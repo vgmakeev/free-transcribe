@@ -1,0 +1,20 @@
+# Compact server glossary. Keep only distinctive names and abbreviations that
+# recur across recordings; the first entries have the highest priority.
+
+1С
+ERP
+УПД
+BPMN
+SAP
+OMS
+Mini
+Surf
+OpenAI
+Codex
+Claude Code
+PostgreSQL
+ClickHouse
+JSONB
+Kafka
+Flutter
+Figma

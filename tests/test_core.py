@@ -661,6 +661,20 @@ class HotwordsTests(unittest.TestCase):
         path = self._write("# glossary\n\nKafka\n\n  gRPC  \n")
         self.assertEqual(_load_hotwords(path), "Kafka\ngRPC")
 
+    def test_deduplicates_terms_case_insensitively(self):
+        path = self._write("Mini\nmini\nMINI\nPostgreSQL\n")
+        self.assertEqual(_load_hotwords(path), "Mini\nPostgreSQL")
+
+    def test_limits_glossary_to_prevent_prompt_recitation(self):
+        path = self._write("\n".join(f"term-{index}" for index in range(40)))
+        terms = _load_hotwords(path).splitlines()
+        self.assertEqual(len(terms), 24)
+        self.assertEqual(terms[-1], "term-23")
+
+    def test_limits_total_glossary_size(self):
+        path = self._write("\n".join("x" * 100 + str(index) for index in range(10)))
+        self.assertLessEqual(len(_load_hotwords(path)), 512)
+
     def test_missing_file_is_not_an_error(self):
         self.assertEqual(_load_hotwords("/nonexistent/glossary.txt"), "")
 

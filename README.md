@@ -200,6 +200,10 @@ same terms come up in every recording, keep them in a file instead and pass
 per line; blank lines and `#` comments are ignored, and the file is re-read per
 run, so editing it takes effect immediately. See `hotwords.example.txt`.
 
+Only the first 24 unique terms, up to 512 characters total, are used. Put the
+most distinctive product names and abbreviations first; omit ordinary words,
+translations, explanations, and terms that do not occur in the recordings.
+
 Write one term per line rather than a comma-separated list. A comma-separated
 list reads as continuable prose: once the audio contains a word from it, the
 model tends to carry on reciting the list instead of transcribing speech.

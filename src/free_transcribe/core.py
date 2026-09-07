@@ -76,6 +76,8 @@ def _qwen_batch_ladder() -> list[int]:
     return ladder
 
 HOTWORDS_PATH_ENV = "FT_HOTWORDS_FILE"
+MAX_HOTWORD_TERMS = 24
+MAX_HOTWORD_CHARS = 512
 
 
 def _load_hotwords(path: str | None = None) -> str:
@@ -85,11 +87,9 @@ def _load_hotwords(path: str | None = None) -> str:
     the next transcription, which matters when the server runs as a service.
     Blank lines and lines starting with `#` are ignored.
 
-    Terms are joined with newlines rather than commas on purpose. A
-    comma-separated list reads as continuable prose: once the audio contains a
-    word that appears in it, the model is prone to carry on reciting the list
-    instead of transcribing speech. One term per line does not have that
-    effect.
+    Terms are deduplicated and bounded because Qwen receives them as generative
+    context, not as a constrained decoder vocabulary. An oversized glossary
+    can therefore be copied into the transcript or trigger repetition.
     """
     source = path or os.environ.get(HOTWORDS_PATH_ENV, "")
     if not source:
@@ -98,8 +98,23 @@ def _load_hotwords(path: str | None = None) -> str:
         raw = Path(source).read_text(encoding="utf-8")
     except OSError:
         return ""
-    terms = [line.strip() for line in raw.splitlines()]
-    return "\n".join(term for term in terms if term and not term.startswith("#"))
+    terms: list[str] = []
+    seen: set[str] = set()
+    total_chars = 0
+    for line in raw.splitlines():
+        term = line.strip()
+        if not term or term.startswith("#"):
+            continue
+        normalized = term.casefold()
+        if normalized in seen:
+            continue
+        added_chars = len(term) + (1 if terms else 0)
+        if len(terms) >= MAX_HOTWORD_TERMS or total_chars + added_chars > MAX_HOTWORD_CHARS:
+            break
+        terms.append(term)
+        seen.add(normalized)
+        total_chars += added_chars
+    return "\n".join(terms)
 
 
 def _combine_context(prompt: str | None, hotwords_file: str | None) -> str | None:

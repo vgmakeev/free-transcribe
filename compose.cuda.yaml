@@ -14,6 +14,7 @@ services:
       FT_API_CONCURRENCY: "${FT_API_CONCURRENCY:-1}"
       FT_API_MAX_QUEUE: "${FT_API_MAX_QUEUE:-20}"
       FT_MAX_UPLOAD_MB: "${FT_MAX_UPLOAD_MB:-4096}"
+      FT_HOTWORDS_FILE: "/app/hotwords.txt"
     volumes:
       - model-cache:/models
     shm_size: "2gb"
