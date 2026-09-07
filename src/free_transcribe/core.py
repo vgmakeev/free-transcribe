@@ -986,6 +986,57 @@ def _pyannote_progress_hook(
     return hook
 
 
+@contextmanager
+def _pyannote_waveform_input(file_path: str, audio_loader: Callable[[str], Any]):
+    """Decode media before pyannote so compressed-file seeking cannot lose samples.
+
+    pyannote 4.x uses TorchCodec to seek into path-based inputs. For the final
+    window of some compressed files, TorchCodec can return fewer samples than
+    requested and pyannote raises instead of padding the window. Passing an
+    in-memory waveform makes pyannote crop by sample index and pad the tail.
+
+    Normalize first so the in-memory tensor is mono 16 kHz regardless of the
+    source channel count or sample rate. The temporary FLAC is removed as soon
+    as it has been decoded; pyannote only receives the waveform mapping.
+    """
+    with tempfile.TemporaryDirectory(prefix="free-transcribe-diarization-") as directory:
+        normalized_path = str(Path(directory) / "audio.flac")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-i",
+                    file_path,
+                    "-vn",
+                    "-map",
+                    "0:a:0",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-c:a",
+                    "flac",
+                    "-y",
+                    normalized_path,
+                ],
+                check=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg is required for speaker diarization") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("Could not prepare audio for speaker diarization") from exc
+
+        waveform, sample_rate = audio_loader(normalized_path)
+
+    yield {
+        "waveform": waveform,
+        "sample_rate": sample_rate,
+        "uri": Path(file_path).stem,
+    }
+
+
 def diarize_media(
     file_path: str,
     *,
@@ -1004,7 +1055,7 @@ def diarize_media(
 
     try:
         import torch
-        from pyannote.audio import Pipeline
+        from pyannote.audio import Audio, Pipeline
     except ImportError as exc:
         raise RuntimeError(
             "Speaker diarization is not installed. Install the platform profile: "
@@ -1061,10 +1112,10 @@ def diarize_media(
         )
 
     progress_hook = _pyannote_progress_hook(on_progress)
-    with _normalized_audio_path(file_path) as diarization_path:
+    with _pyannote_waveform_input(file_path, Audio()) as diarization_input:
         try:
             output = pipeline(
-                diarization_path,
+                diarization_input,
                 hook=progress_hook,
                 **diarization_options,
             )
@@ -1079,7 +1130,7 @@ def diarize_media(
             pipeline.to(torch.device("cpu"))
             resolved_device = "cpu"
             output = pipeline(
-                diarization_path,
+                diarization_input,
                 hook=progress_hook,
                 **diarization_options,
             )

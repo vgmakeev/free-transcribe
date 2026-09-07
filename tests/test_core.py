@@ -19,6 +19,7 @@ from free_transcribe.core import (
     _load_hotwords,
     _normalized_audio_path,
     _pyannote_progress_hook,
+    _pyannote_waveform_input,
     _qwen_batch_ladder,
     _transcribe_parakeet,
     _transcribe_parakeet_cuda,
@@ -181,6 +182,33 @@ class TranscriptionPipelineTests(unittest.TestCase):
             self.assertEqual(command[command.index("-ar") + 1], "16000")
 
         self.assertFalse(Path(audio_path).exists())
+
+    def test_pyannote_receives_normalized_waveform_instead_of_media_path(self):
+        waveform = object()
+        loaded_paths = []
+
+        def load_audio(path):
+            loaded_paths.append(path)
+            self.assertTrue(Path(path).exists())
+            return waveform, 16000
+
+        def fake_run(command, **_kwargs):
+            Path(command[-1]).write_bytes(b"normalized")
+            return SimpleNamespace(returncode=0)
+
+        with (
+            patch("free_transcribe.core.subprocess.run", side_effect=fake_run) as run,
+            _pyannote_waveform_input("meeting.ogg", load_audio) as pyannote_input,
+        ):
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("-ac") + 1], "1")
+            self.assertEqual(command[command.index("-ar") + 1], "16000")
+            self.assertEqual(command[command.index("-map") + 1], "0:a:0")
+            self.assertIs(pyannote_input["waveform"], waveform)
+            self.assertEqual(pyannote_input["sample_rate"], 16000)
+            self.assertEqual(pyannote_input["uri"], "meeting")
+
+        self.assertFalse(Path(loaded_paths[0]).exists())
 
     def test_prepared_audio_is_shared_by_asr_and_diarization(self):
         engine_output = _EngineOutput(
