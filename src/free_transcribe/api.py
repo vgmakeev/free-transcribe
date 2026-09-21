@@ -6,7 +6,6 @@ import hmac
 import importlib.util
 import json
 import os
-import platform
 import re
 import shutil
 import tempfile
@@ -30,6 +29,7 @@ from .core import (
     save_transcript,
     transcribe_file,
 )
+from .gemini import gemini_available
 
 WEB_ROOT = Path(__file__).with_name("web")
 
@@ -47,16 +47,10 @@ def _module_available(name: str) -> bool:
 
 def _runtime_capabilities() -> dict[str, Any]:
     """Report lightweight backend readiness without loading model frameworks."""
-    apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
-    qwen_module = "mlx_qwen3_asr" if apple_silicon else "qwen_asr"
-    parakeet_module = "mlx_audio" if apple_silicon else "nemo"
-    engines = {
-        "qwen": _module_available(qwen_module),
-        "parakeet": _module_available(parakeet_module),
-    }
     return {
-        "engines": engines,
+        "engines": {"parakeet": _module_available("nemo")},
         "speakers": _module_available("pyannote.audio"),
+        "gemini": gemini_available(),
     }
 
 
@@ -99,7 +93,6 @@ def _bearer_token(request: Request) -> str:
     return value if scheme.casefold() == "bearer" else ""
 
 
-
 def _release_gpu_memory() -> None:
     """Return cached GPU memory to the driver once a job is done.
 
@@ -116,6 +109,7 @@ def _release_gpu_memory() -> None:
             torch.cuda.empty_cache()
     except ImportError:
         pass
+
 
 def create_app(
     *,
@@ -241,9 +235,10 @@ def create_app(
         engine: str,
         model: str | None,
         language: str | None,
-        prompt: str | None,
         speakers: bool,
         speaker_count: int | None,
+        speaker_names: list[str] | None,
+        gemini: bool,
     ) -> None:
         async with inference_slots:
             job.status = "running"
@@ -270,11 +265,12 @@ def create_app(
                     str(job.source_path),
                     model_name=model,
                     language=language,
-                    prompt=prompt,
                     on_progress=progress,
                     engine=engine,
                     diarize=speakers,
                     num_speakers=speaker_count,
+                    speaker_names=speaker_names,
+                    gemini=gemini,
                 )
                 result_path = job.work_dir / "transcript.md"
                 await asyncio.to_thread(
@@ -334,9 +330,10 @@ def create_app(
         engine: Annotated[str, Form()] = DEFAULT_ENGINE,
         model: Annotated[str | None, Form()] = None,
         language: Annotated[str | None, Form()] = None,
-        prompt: Annotated[str | None, Form()] = None,
         speakers: Annotated[bool, Form()] = False,
         speaker_count: Annotated[int | None, Form()] = None,
+        speaker_names: Annotated[str | None, Form()] = None,
+        gemini: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
         nonlocal uploads_in_progress
         engine = engine.casefold()
@@ -347,6 +344,16 @@ def create_app(
             )
         if speaker_count is not None and speaker_count < 1:
             raise HTTPException(status_code=422, detail="speaker_count must be positive")
+        if gemini and not gemini_available():
+            raise HTTPException(
+                status_code=422,
+                detail="Gemini correction requires GEMINI_API_KEY on the server",
+            )
+        parsed_names = (
+            [name.strip() for name in speaker_names.split(",") if name.strip()]
+            if speaker_names
+            else None
+        )
 
         suffix = Path(file.filename or "").suffix.casefold()
         if suffix not in SUPPORTED_FORMATS:
@@ -404,9 +411,10 @@ def create_app(
                 engine=engine,
                 model=model,
                 language=language,
-                prompt=prompt,
-                speakers=speakers or speaker_count is not None,
+                speakers=speakers or speaker_count is not None or bool(parsed_names),
                 speaker_count=speaker_count,
+                speaker_names=parsed_names,
+                gemini=gemini,
             )
         )
         tasks[job_id] = task

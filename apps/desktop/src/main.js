@@ -5,17 +5,11 @@ import { Command } from "@tauri-apps/plugin-shell";
 import "./style.css";
 
 const PROFILES = {
-  "qwen-quality": {
-    engine: "qwen",
-    model: null,
-    size: "4.7 GB",
-    note: "best accuracy",
-  },
   parakeet: {
     engine: "parakeet",
     model: null,
     size: "2.5 GB",
-    note: "fastest on Apple Silicon",
+    note: "NVIDIA speech recognition",
   },
 };
 
@@ -27,6 +21,9 @@ const elements = {
   speakers: $("#speakers"),
   countRow: $("#count-row"),
   speakerCount: $("#speaker-count"),
+  namesRow: $("#names-row"),
+  speakerNames: $("#speaker-names"),
+  gemini: $("#gemini"),
   start: $("#start"),
   cancel: $("#cancel"),
   openResult: $("#open-result"),
@@ -48,6 +45,7 @@ let timer = null;
 let stderrLines = [];
 let runtimeReady = false;
 let speakerReady = false;
+let geminiReady = false;
 
 function refreshStart() {
   elements.start.disabled = !runtimeReady || !mediaPath || Boolean(child);
@@ -59,11 +57,9 @@ function selectedProfile() {
 
 function refreshProfileInfo() {
   const profile = selectedProfile();
-  const alignment = elements.speakers.checked && profile.engine === "qwen"
-    ? " · +1.8 GB speaker aligner"
-    : "";
-  elements.profileInfo.textContent = `First use: ~${profile.size}${alignment} · ${profile.note}. Cached afterward.`;
+  elements.profileInfo.textContent = `First use: ~${profile.size} · ${profile.note}. Cached afterward.`;
   elements.countRow.classList.toggle("hidden", !elements.speakers.checked);
+  elements.namesRow.classList.toggle("hidden", !elements.speakers.checked);
 }
 
 function setStage(active, completed = []) {
@@ -100,6 +96,8 @@ function setRunning(running) {
   elements.drop.disabled = running;
   elements.engine.disabled = running || !runtimeReady;
   elements.speakers.disabled = running || !speakerReady;
+  elements.speakerNames.disabled = running || !speakerReady;
+  elements.gemini.disabled = running || !geminiReady;
   elements.progressBar.classList.toggle("active", running);
   if (running) {
     startedAt = Date.now();
@@ -131,21 +129,23 @@ async function checkRuntime() {
     const output = await Command.create("ft", ["doctor"]).execute();
     if (output.code !== 0) throw new Error(output.stderr);
     const doctor = JSON.parse(output.stdout);
-    const engines = ["qwen", "parakeet"];
+    const engines = ["parakeet"];
     const available = engines.filter((name) => doctor.ready[name]);
     for (const option of elements.engine.options) {
       option.disabled = !doctor.ready[PROFILES[option.value].engine];
     }
-    if (!doctor.ready[selectedProfile().engine] && available.length) {
-      elements.engine.value = available[0] === "qwen" ? "qwen-quality" : "parakeet";
-    }
     runtimeReady = available.length > 0;
     speakerReady = Boolean(doctor.ready.speaker_transcription);
+    geminiReady = Boolean(doctor.ready.gemini);
     elements.engine.disabled = !runtimeReady;
     elements.speakers.disabled = !speakerReady;
+    elements.speakerNames.disabled = !speakerReady;
+    elements.gemini.disabled = !geminiReady;
+    if (!geminiReady) elements.gemini.checked = false;
     if (!speakerReady) {
       elements.speakers.checked = false;
       elements.countRow.classList.add("hidden");
+      elements.namesRow.classList.add("hidden");
     }
     elements.runtime.textContent = available.length
       ? `Local · ${available.join(" · ")}${speakerReady ? " · speakers" : ""}`
@@ -164,10 +164,13 @@ async function transcribe() {
   const profile = selectedProfile();
   const args = [mediaPath, "--engine", profile.engine];
   if (profile.model) args.push("--model", profile.model);
+  if (elements.gemini.checked) args.push("--gemini");
   if (elements.speakers.checked) {
     const count = elements.speakerCount.value.trim();
     args.push("--speakers");
     if (count) args.push(count);
+    const names = elements.speakerNames.value.trim();
+    if (names) args.push("--names", names);
   }
 
   stderrLines = [];
@@ -212,8 +215,13 @@ async function transcribe() {
           elements.progressBar.classList.add("active");
         }
       }
+      if (stage === "correcting") {
+        setStage("correct", ["model", "transcription", "speakers"]);
+        elements.progressBar.style.width = "";
+        elements.progressBar.classList.add("active");
+      }
       if (stage === "complete") {
-        setStage("done", ["model", "transcription", "speakers"]);
+        setStage("done", ["model", "transcription", "speakers", "correct"]);
       }
     }
     const download = line.match(/(?:Fetching|Downloading).*?\b(\d{1,3})%/i);
@@ -235,7 +243,7 @@ async function transcribe() {
     if (code === 0) {
       resultPath = [...stderrLines].reverse().find((line) => line.toLowerCase().endsWith(".md")) ?? null;
       elements.statusText.textContent = "Complete";
-      setStage("done", ["model", "transcription", "speakers", "done"]);
+      setStage("done", ["model", "transcription", "speakers", "correct", "done"]);
       elements.progressBar.style.width = "100%";
       elements.openResult.classList.toggle("hidden", !resultPath);
     } else {
@@ -257,6 +265,7 @@ elements.cancel.addEventListener("click", async () => child?.kill());
 elements.openResult.addEventListener("click", () => resultPath && openPath(resultPath));
 elements.speakers.addEventListener("change", () => {
   elements.countRow.classList.toggle("hidden", !elements.speakers.checked);
+  elements.namesRow.classList.toggle("hidden", !elements.speakers.checked);
   refreshProfileInfo();
 });
 elements.engine.addEventListener("change", refreshProfileInfo);

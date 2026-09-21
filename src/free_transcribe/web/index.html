@@ -26,13 +26,7 @@
         <input id="file" type="file" accept="audio/*,video/*" hidden />
 
         <div class="options">
-          <label>Profile
-            <select id="profile">
-              <option value="parakeet">Fast · Parakeet</option>
-              <option value="quality">Maximum quality · Qwen 1.7B</option>
-            </select>
-          </label>
-          <small id="profile-info"></small>
+          <p><strong>Parakeet</strong><br /><small>NVIDIA CUDA speech recognition</small></p>
           <label class="switch">
             <span>Identify speakers<small>pyannote, automatic count</small></span>
             <input id="speakers" type="checkbox" checked />
@@ -40,17 +34,26 @@
           <label id="count-row" class="hidden">Exact speaker count
             <input id="speaker-count" type="number" min="1" placeholder="auto" />
           </label>
+          <label id="names-row">Names by first appearance
+            <input id="speaker-names" type="text" placeholder="Владимир, Иван" />
+          </label>
+          <label class="switch">
+            <span>Correct terminology<small>Gemini receives transcript text only</small></span>
+            <input id="gemini" type="checkbox" checked />
+          </label>
         </div>
         <button id="start" class="primary" type="button" disabled>Transcribe</button>
       </section>
 
       <section id="progress" class="progress-panel hidden" aria-live="polite">
         <ol id="stages" class="stages">
-          <li data-step="upload"><span>1</span>Upload</li>
-          <li data-step="model"><span>2</span>Model</li>
-          <li data-step="text"><span>3</span>Text</li>
-          <li data-step="speakers"><span>4</span>Speakers</li>
-          <li data-step="done"><span>5</span>Done</li>
+          <li data-step="extract"><span>1</span>Audio</li>
+          <li data-step="upload"><span>2</span>Upload</li>
+          <li data-step="model"><span>3</span>Model</li>
+          <li data-step="text"><span>4</span>Text</li>
+          <li data-step="speakers"><span>5</span>Speakers</li>
+          <li data-step="correct"><span>6</span>Correct</li>
+          <li data-step="done"><span>7</span>Done</li>
         </ol>
         <div class="status-line"><span id="status">Waiting…</span><span id="percent"></span></div>
         <div class="bar"><span id="bar"></span></div>

@@ -32,10 +32,11 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="transcribe",
-            description="""Transcribe audio/video locally with Qwen or Parakeet.
+            description="""Transcribe audio/video locally with Parakeet.
 
 Supports formats: mp3, wav, m4a, flac, ogg, mp4, webm, mkv, avi, mov.
-Apple Silicon uses MLX acceleration. Speaker diarization uses pyannote.
+NVIDIA CUDA acceleration is used for Parakeet. Speaker diarization uses pyannote.
+Optional Gemini correction sends transcript text, never media.
 
 The transcript is saved as a Markdown file next to the source file (in ./Transcripts/ folder)
 and the content is also returned directly.""",
@@ -50,7 +51,7 @@ and the content is also returned directly.""",
                         "type": "string",
                         "enum": list(AVAILABLE_ENGINES),
                         "default": DEFAULT_ENGINE,
-                        "description": "ASR engine; qwen prioritizes quality",
+                        "description": "ASR engine (Parakeet)",
                     },
                     "model": {
                         "type": "string",
@@ -60,9 +61,10 @@ and the content is also returned directly.""",
                         "type": "string",
                         "description": "Language code (e.g., 'ru', 'en'). Auto-detect if not specified.",
                     },
-                    "prompt": {
-                        "type": "string",
-                        "description": "Context, terminology, and proper names that improve accuracy",
+                    "gemini": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Correct the complete transcript with Gemini and the bundled glossary",
                     },
                     "diarize": {
                         "type": "boolean",
@@ -133,11 +135,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 ## Engines
 | Engine | Default model | Profile |
 |--------|---------------|---------|
-| **qwen** | {DEFAULT_MODELS["qwen"]} | Best quality (default) |
-| **parakeet** | {DEFAULT_MODELS["parakeet"]} | Fast |
+| **parakeet** | {DEFAULT_MODELS["parakeet"]} | NVIDIA CUDA |
 
 Models are downloaded automatically from Hugging Face on first use.
-Apple Silicon is optimized with MLX. Other platform adapters are experimental.
+The production profile runs on NVIDIA CUDA.
 
 Speaker diarization is available with `diarize: true` after installing the
 `diarization` extra and authorizing the pyannote Community-1 model.
@@ -149,7 +150,7 @@ Speaker diarization is available with `diarize: true` after installing the
         engine = arguments.get("engine", DEFAULT_ENGINE)
         model_name = arguments.get("model")
         language = arguments.get("language")
-        prompt = arguments.get("prompt")
+        gemini = arguments.get("gemini", False)
         diarize = arguments.get("diarize", False)
         num_speakers = arguments.get("num_speakers")
         min_speakers = arguments.get("min_speakers")
@@ -187,7 +188,6 @@ Speaker diarization is available with `diarize: true` after installing the
                 engine=engine,
                 model_name=model_name,
                 language=language,
-                prompt=prompt,
                 on_progress=on_progress,
                 diarize=diarize,
                 diarization_device=diarization_device,
@@ -195,6 +195,7 @@ Speaker diarization is available with `diarize: true` after installing the
                 min_speakers=min_speakers,
                 max_speakers=max_speakers,
                 speaker_names=speaker_names,
+                gemini=gemini,
             )
 
             # Generate markdown content

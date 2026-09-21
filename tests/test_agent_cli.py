@@ -39,7 +39,7 @@ class AgentArtifactTests(unittest.TestCase):
             duration_min=1 / 60,
             device="mlx",
             model="test/asr",
-            engine="qwen",
+            engine="parakeet",
         )
         self.diarization_result = DiarizationResult(
             turns=[

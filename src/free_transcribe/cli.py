@@ -30,6 +30,7 @@ from .core import (
     save_transcript,
     transcribe_file,
 )
+from .gemini import DEFAULT_GEMINI_MODEL, gemini_available
 
 COMMANDS = {
     "run",
@@ -41,6 +42,13 @@ COMMANDS = {
     "doctor",
     "serve",
 }
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False
 
 
 def _progress(stage: str, message: str) -> None:
@@ -111,8 +119,6 @@ def _run_asr(args: argparse.Namespace) -> None:
         engine=args.engine,
         model_name=args.model,
         language=args.lang,
-        prompt=args.prompt,
-        hotwords_file=args.hotwords_file,
         word_timestamps=args.timestamps == "word",
         on_progress=_progress,
     )
@@ -175,8 +181,6 @@ def _run_one_shot(args: argparse.Namespace) -> None:
         engine=args.engine,
         model_name=args.model,
         language=args.lang,
-        prompt=args.prompt,
-        hotwords_file=args.hotwords_file,
         diarize=diarize,
         diarization_model=args.diarization_model,
         diarization_device=args.diarization_device,
@@ -184,6 +188,9 @@ def _run_one_shot(args: argparse.Namespace) -> None:
         min_speakers=args.min_speakers,
         max_speakers=args.max_speakers,
         speaker_names=_parse_names(args.names),
+        gemini=args.gemini,
+        glossary_file=args.glossary_file,
+        gemini_model=args.gemini_model,
         on_progress=_progress,
     )
     if args.output == "-":
@@ -195,11 +202,9 @@ def _run_one_shot(args: argparse.Namespace) -> None:
 
 def _run_doctor(args: argparse.Namespace) -> None:
     apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
-    mlx_qwen = importlib.util.find_spec("mlx_qwen3_asr") is not None
-    qwen_torch = importlib.util.find_spec("qwen_asr") is not None
-    parakeet_mlx = importlib.util.find_spec("mlx_audio") is not None
-    parakeet_cuda = importlib.util.find_spec("nemo") is not None
-    torch_installed = importlib.util.find_spec("torch") is not None
+    parakeet_mlx = _module_available("mlx_audio")
+    parakeet_cuda = _module_available("nemo")
+    torch_installed = _module_available("torch")
     cuda = False
     if torch_installed and not apple_silicon:
         try:
@@ -209,18 +214,14 @@ def _run_doctor(args: argparse.Namespace) -> None:
         except (ImportError, RuntimeError):
             cuda = False
     capabilities = {
-        "qwen": mlx_qwen or qwen_torch,
-        "qwen_mlx": mlx_qwen,
-        "qwen_transformers": qwen_torch,
         "parakeet": parakeet_mlx or parakeet_cuda,
         "parakeet_mlx": parakeet_mlx,
         "parakeet_cuda": parakeet_cuda,
-        "diarization": importlib.util.find_spec("pyannote.audio") is not None,
-        "mcp": importlib.util.find_spec("mcp") is not None,
-        "api": importlib.util.find_spec("fastapi") is not None
-        and importlib.util.find_spec("uvicorn") is not None,
+        "diarization": _module_available("pyannote.audio"),
+        "mcp": _module_available("mcp"),
+        "api": _module_available("fastapi") and _module_available("uvicorn"),
+        "gemini": gemini_available(),
     }
-    qwen_ready = (apple_silicon and mlx_qwen) or (cuda and qwen_torch)
     parakeet_ready = (apple_silicon and parakeet_mlx) or (cuda and parakeet_cuda)
     payload = {
         "schema": "free-transcribe/doctor/v1",
@@ -238,12 +239,11 @@ def _run_doctor(args: argparse.Namespace) -> None:
             os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
         ),
         "ready": {
-            "qwen": qwen_ready,
             "parakeet": parakeet_ready,
             "diarization": capabilities["diarization"],
-            "word_alignment": qwen_ready,
             "speaker_transcription": capabilities["diarization"]
-            and (qwen_ready or parakeet_ready),
+            and parakeet_ready,
+            "gemini": capabilities["gemini"],
             "mcp": capabilities["mcp"],
             "api": capabilities["api"],
             "artifact_tools": True,
@@ -270,10 +270,22 @@ def _add_asr_options(parser: argparse.ArgumentParser) -> None:
         help="model path or Hugging Face ID; selected engine default if omitted",
     )
     parser.add_argument("-l", "--lang", help="language code/name; auto if omitted")
-    parser.add_argument("-p", "--prompt", help="known terms or names for Qwen")
+
+
+def _add_gemini_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--hotwords-file",
-        help="file with domain terms, one per line, appended to the prompt",
+        "--gemini",
+        action="store_true",
+        help="proofread the complete transcript with Gemini after local processing",
+    )
+    parser.add_argument(
+        "--glossary-file",
+        help="compact JSON glossary; bundled IT glossary if omitted",
+    )
+    parser.add_argument(
+        "--gemini-model",
+        default=DEFAULT_GEMINI_MODEL,
+        help=argparse.SUPPRESS,
     )
 
 
@@ -312,6 +324,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("file")
     _add_asr_options(run)
     _add_speaker_options(run)
+    _add_gemini_options(run)
     run.add_argument("-o", "--output", help="Markdown path; '-' writes to stdout")
     run.set_defaults(handler=_run_one_shot)
 
@@ -322,7 +335,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--timestamps",
         choices=["segment", "word"],
         default="segment",
-        help="word invokes the Qwen ForcedAligner and is required by merge",
+        help="Parakeet word timestamps are required by merge",
     )
     asr.add_argument("-o", "--output", default="-")
     asr.set_defaults(handler=_run_asr)

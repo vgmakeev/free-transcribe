@@ -1,7 +1,7 @@
 [project]
 name = "free-transcribe"
-version = "0.2.0"
-description = "Accurate local transcription with Qwen, Parakeet, and pyannote diarization."
+version = "0.3.0"
+description = "NVIDIA Parakeet transcription with pyannote diarization and optional Gemini correction."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.14"
@@ -10,20 +10,17 @@ dependencies = []
 [project.optional-dependencies]
 apple = [
     "httpx[socks]>=0.28,<1",
-    "mlx-qwen3-asr>=0.3.5,<0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-audio>=0.4.6,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "pyannote.audio>=4.0,<5",
 ]
 cuda = [
     "httpx[socks]>=0.28,<1",
-    "qwen-asr>=0.0.6,<0.1; sys_platform == 'linux'",
     "nemo-toolkit[asr]>=2.7.3,<2.8; sys_platform == 'linux'",
     "numba>=0.66,<0.67; sys_platform == 'linux'",
     "pyannote.audio>=4.0,<5",
 ]
 windows = [
     "httpx[socks]>=0.28,<1",
-    "qwen-asr>=0.0.6,<0.1; sys_platform == 'win32'",
     "pyannote.audio>=4.0,<5",
 ]
 diarization = [

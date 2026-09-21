@@ -23,8 +23,24 @@ class ApiTests(unittest.TestCase):
             self.assertIn("default-src 'self'", response.headers["content-security-policy"])
             self.assertEqual(client.get("/assets/app.js").status_code, 200)
             health = client.get("/health").json()
-            self.assertEqual(set(health["ready"]["engines"]), {"qwen", "parakeet"})
+            self.assertEqual(set(health["ready"]["engines"]), {"parakeet"})
             self.assertIsInstance(health["ready"]["speakers"], bool)
+            self.assertIsInstance(health["ready"]["gemini"], bool)
+
+    def test_gemini_request_requires_server_key(self):
+        app = create_app()
+        with (
+            patch("free_transcribe.api.gemini_available", return_value=False),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                "/v1/transcriptions",
+                files={"file": ("sample.wav", b"audio")},
+                data={"gemini": "true"},
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("GEMINI_API_KEY", response.json()["detail"])
 
     def test_authenticated_background_transcription(self):
         result = TranscriptResult(

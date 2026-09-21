@@ -1,6 +1,6 @@
 [package]
 name = "free-transcribe-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Tiny local UI for Free Transcribe"
 edition = "2024"
 license = "MIT"

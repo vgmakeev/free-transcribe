@@ -31,14 +31,9 @@ SUPPORTED_FORMATS = {
 }
 VIDEO_FORMATS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
 
-AVAILABLE_ENGINES = ("qwen", "parakeet")
-DEFAULT_ENGINE = (
-    "parakeet"
-    if platform.system() == "Darwin" and platform.machine() == "arm64"
-    else "qwen"
-)
+AVAILABLE_ENGINES = ("parakeet",)
+DEFAULT_ENGINE = "parakeet"
 DEFAULT_MODELS = {
-    "qwen": "Qwen/Qwen3-ASR-1.7B",
     "parakeet": (
         "mlx-community/parakeet-tdt-0.6b-v3"
         if platform.system() == "Darwin" and platform.machine() == "arm64"
@@ -47,93 +42,6 @@ DEFAULT_MODELS = {
 }
 DEFAULT_MODEL = DEFAULT_MODELS[DEFAULT_ENGINE]
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
-
-QWEN_BATCH_ENV = "FT_QWEN_BATCH"
-DEFAULT_QWEN_BATCH = 8
-
-
-def _qwen_batch_ladder() -> list[int]:
-    """Batch sizes to try for the CUDA backend, largest first.
-
-    Peak VRAM grows with the batch size, and the ceiling depends on the card,
-    on the length of the recording and on whatever else shares the GPU, so no
-    single hard-coded value fits every setup. Stepping down and retrying makes
-    a long recording transcribe slower instead of failing with CUDA OOM.
-    """
-    raw = os.environ.get(QWEN_BATCH_ENV, "")
-    try:
-        start = int(raw) if raw else DEFAULT_QWEN_BATCH
-    except ValueError:
-        start = DEFAULT_QWEN_BATCH
-    start = max(1, start)
-
-    ladder: list[int] = []
-    size = start
-    while size > 1:
-        ladder.append(size)
-        size //= 2
-    ladder.append(1)
-    return ladder
-
-HOTWORDS_PATH_ENV = "FT_HOTWORDS_FILE"
-MAX_HOTWORD_TERMS = 24
-MAX_HOTWORD_CHARS = 512
-
-
-def _load_hotwords(path: str | None = None) -> str:
-    """Read a glossary file into a context string, one term per line.
-
-    The file is re-read per call so that editing the glossary takes effect on
-    the next transcription, which matters when the server runs as a service.
-    Blank lines and lines starting with `#` are ignored.
-
-    Terms are deduplicated and bounded because Qwen receives them as generative
-    context, not as a constrained decoder vocabulary. An oversized glossary
-    can therefore be copied into the transcript or trigger repetition.
-    """
-    source = path or os.environ.get(HOTWORDS_PATH_ENV, "")
-    if not source:
-        return ""
-    try:
-        raw = Path(source).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    terms: list[str] = []
-    seen: set[str] = set()
-    total_chars = 0
-    for line in raw.splitlines():
-        term = line.strip()
-        if not term or term.startswith("#"):
-            continue
-        normalized = term.casefold()
-        if normalized in seen:
-            continue
-        added_chars = len(term) + (1 if terms else 0)
-        if len(terms) >= MAX_HOTWORD_TERMS or total_chars + added_chars > MAX_HOTWORD_CHARS:
-            break
-        terms.append(term)
-        seen.add(normalized)
-        total_chars += added_chars
-    return "\n".join(terms)
-
-
-def _combine_context(prompt: str | None, hotwords_file: str | None) -> str | None:
-    """Merge the per-run prompt with the glossary, prompt first."""
-    parts = [part for part in (prompt or "", _load_hotwords(hotwords_file)) if part]
-    return "\n".join(parts) or None
-
-DEFAULT_FORCED_ALIGNER_MODEL = "Qwen/Qwen3-ForcedAligner-0.6B"
-
-LANGUAGE_NAMES = {
-    "ru": "Russian",
-    "en": "English",
-    "de": "German",
-    "es": "Spanish",
-    "fr": "French",
-    "it": "Italian",
-    "pt": "Portuguese",
-    "uk": "Ukrainian",
-}
 
 ProgressCallback = Callable[[str, str], None]
 
@@ -180,6 +88,11 @@ class TranscriptResult:
     speaker_count: int = 0
     diarization_model: str | None = None
     words: list[TranscriptWord] = field(default_factory=list)
+    proofreading_model: str | None = None
+    proofreading_edits: int = 0
+    proofreading_rejected: int = 0
+    proofreading_input_tokens: int | None = None
+    proofreading_output_tokens: int | None = None
 
 
 @dataclass
@@ -446,84 +359,6 @@ def _require_apple_silicon(engine: str) -> None:
         )
 
 
-def _qwen_language(language: str | None) -> str | None:
-    if not language:
-        return None
-    return LANGUAGE_NAMES.get(language.casefold(), language)
-
-
-def _transcribe_qwen_mlx(
-    file_path: str,
-    *,
-    model_name: str,
-    language: str | None,
-    context: str | None,
-    need_words: bool,
-    on_progress: ProgressCallback | None = None,
-) -> _EngineOutput:
-    _require_apple_silicon("Qwen3-ASR")
-    try:
-        from mlx_qwen3_asr import transcribe as qwen_transcribe
-    except ImportError as exc:
-        raise RuntimeError(
-            "Qwen support is not installed. Install the 'apple' profile."
-        ) from exc
-
-    def mlx_progress(payload: dict[str, Any]) -> None:
-        if on_progress is None or payload.get("event") not in {
-            "chunks_prepared",
-            "chunk_completed",
-        }:
-            return
-        fraction = min(max(float(payload.get("progress", 0.0)), 0.0), 1.0)
-        percent = int(fraction * 100)
-        processed = float(payload.get("processed_audio_sec", 0.0))
-        duration = float(payload.get("audio_duration_sec", 0.0))
-        chunk = int(payload.get("chunk_index", 0))
-        chunks = int(payload.get("total_chunks", 0))
-        details = f"{format_timestamp(processed)} / {format_timestamp(duration)}"
-        if chunks:
-            details += f" · chunk {chunk}/{chunks}"
-        on_progress("transcribing", f"Transcribing… {percent}% · {details}")
-
-    result = qwen_transcribe(
-        file_path,
-        model=model_name,
-        context=context or "",
-        language=_qwen_language(language),
-        return_timestamps=need_words,
-        return_chunks=True,
-        on_progress=mlx_progress,
-    )
-    raw_words = list(result.segments or [])
-    words = _words_from_items(raw_words)
-    chunks = list(result.chunks or [])
-    segments = [
-        TranscriptSegment(
-            start=float(chunk.get("start", 0.0)),
-            end=float(chunk.get("end", chunk.get("start", 0.0))),
-            text=str(chunk.get("text", "")).strip(),
-        )
-        for chunk in chunks
-        if str(chunk.get("text", "")).strip()
-    ]
-    if not segments and words:
-        segments = [
-            TranscriptSegment(word.start, word.end, word.text.strip()) for word in words
-        ]
-    duration = max(
-        [segment.end for segment in segments] + [word.end for word in words] + [0.0]
-    )
-    return _EngineOutput(
-        text=str(result.text).strip(),
-        segments=segments,
-        words=words,
-        language=str(result.language or language or "unknown"),
-        duration_min=duration / 60,
-        device="mlx",
-    )
-
-
 def _media_duration_seconds(file_path: str) -> float:
     """Read duration without loading media into Python memory."""
     try:
@@ -581,142 +416,6 @@ def _normalized_audio_path(file_path: str):
         except subprocess.CalledProcessError as exc:
             raise RuntimeError("Could not extract audio from media") from exc
         yield audio_path
-
-
-def _transcribe_qwen_torch(
-    file_path: str,
-    *,
-    model_name: str,
-    language: str | None,
-    context: str | None,
-    need_words: bool,
-    on_progress: ProgressCallback | None = None,
-) -> _EngineOutput:
-    """Official Qwen Transformers backend for NVIDIA CUDA (Windows/Linux)."""
-    del on_progress
-    try:
-        import torch
-        from qwen_asr import Qwen3ASRModel
-    except ImportError as exc:
-        raise RuntimeError(
-            "Qwen CUDA support is not installed. Install the 'cuda' profile."
-        ) from exc
-
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "The Qwen backend on Windows/Linux currently requires an NVIDIA "
-            "GPU with a working CUDA build of PyTorch."
-        )
-
-    device = "cuda:0"
-    options: dict[str, Any] = {
-        "dtype": torch.bfloat16,
-        "device_map": device,
-        "max_new_tokens": 4096,
-    }
-    if need_words:
-        options.update(
-            {
-                "forced_aligner": DEFAULT_FORCED_ALIGNER_MODEL,
-                "forced_aligner_kwargs": {
-                    "dtype": torch.bfloat16,
-                    "device_map": device,
-                },
-            }
-        )
-
-    ladder = _qwen_batch_ladder()
-    results = None
-    last_oom: str | None = None
-    for batch_size in ladder:
-        options["max_inference_batch_size"] = batch_size
-        try:
-            model = Qwen3ASRModel.from_pretrained(model_name, **options)
-            results = model.transcribe(
-                audio=file_path,
-                context=context or "",
-                language=_qwen_language(language),
-                return_time_stamps=need_words,
-            )
-            break
-        except torch.cuda.OutOfMemoryError as exc:
-            # Keep the message, not the exception: holding the exception keeps
-            # its traceback, which keeps the frames, which keep the tensors
-            # allocated inside qwen-asr. With that reference alive
-            # `empty_cache()` frees almost nothing and every retry hits the
-            # same ceiling, so a batch of 1 fails just like a batch of 8.
-            last_oom = str(exc)
-            del exc
-            model = None
-            results = None
-            gc.collect()
-            torch.cuda.empty_cache()
-
-    if results is None:
-        raise RuntimeError(
-            "Qwen ran out of GPU memory even with a batch size of 1. "
-            "Free up VRAM or transcribe a shorter recording. "
-            f"Last CUDA error: {last_oom or 'unknown'}"
-        )
-    if not results:
-        raise RuntimeError("Qwen returned no transcription result")
-    result = results[0]
-    raw_timestamps = list(getattr(result, "time_stamps", None) or [])
-    words = [
-        TranscriptWord(
-            float(item.start_time),
-            float(item.end_time),
-            str(item.text),
-        )
-        for item in raw_timestamps
-        if getattr(item, "start_time", None) is not None
-        and getattr(item, "end_time", None) is not None
-    ]
-    duration = max(
-        [word.end for word in words] + [_media_duration_seconds(file_path), 0.0]
-    )
-    text = str(getattr(result, "text", "")).strip()
-    segments = (
-        [TranscriptSegment(word.start, word.end, word.text.strip()) for word in words]
-        if words
-        else [TranscriptSegment(0.0, duration, text)]
-    )
-    return _EngineOutput(
-        text=text,
-        segments=[segment for segment in segments if segment.text],
-        words=words,
-        language=str(getattr(result, "language", None) or language or "unknown"),
-        duration_min=duration / 60,
-        device="cuda",
-    )
-
-
-def _transcribe_qwen(
-    file_path: str,
-    *,
-    model_name: str,
-    language: str | None,
-    context: str | None,
-    need_words: bool,
-    on_progress: ProgressCallback | None = None,
-) -> _EngineOutput:
-    if _is_apple_silicon():
-        return _transcribe_qwen_mlx(
-            file_path,
-            model_name=model_name,
-            language=language,
-            context=context,
-            need_words=need_words,
-            on_progress=on_progress,
-        )
-    return _transcribe_qwen_torch(
-        file_path,
-        model_name=model_name,
-        language=language,
-        context=context,
-        need_words=need_words,
-        on_progress=on_progress,
-    )
 
 
 def _transcribe_parakeet_mlx(
@@ -1203,9 +902,7 @@ def _transcribe_prepared(
     *,
     resolved_model: str,
     language: str | None,
-    prompt: str | None,
     on_progress: ProgressCallback | None,
-    engine: str,
     diarize: bool,
     diarization_model: str,
     diarization_device: str,
@@ -1214,35 +911,22 @@ def _transcribe_prepared(
     min_speakers: int | None,
     max_speakers: int | None,
     speaker_names: list[str] | None,
-    word_timestamps: bool,
 ) -> TranscriptResult:
     """Run model stages on already normalized audio."""
-    if engine == "qwen":
-        engine_output = _transcribe_qwen(
-            file_path,
-            model_name=resolved_model,
-            language=language,
-            context=prompt,
-            need_words=diarize or word_timestamps,
-            on_progress=on_progress,
-        )
-    else:
-        engine_output = _transcribe_parakeet(
-            file_path,
-            model_name=resolved_model,
-            language=language,
-            context=prompt,
-            on_progress=on_progress,
-        )
+    engine_output = _transcribe_parakeet(
+        file_path,
+        model_name=resolved_model,
+        language=language,
+        context=None,
+        on_progress=on_progress,
+    )
 
     speaker_count = 0
     used_diarization_model: str | None = None
     segments = engine_output.segments
     if diarize:
         # The ASR model is no longer needed. Releasing it before pyannote is
-        # loaded keeps peak memory bounded by one model instead of the sum,
-        # which matters for every engine, not just Parakeet: on CUDA the Qwen
-        # weights plus the forced aligner are several gigabytes on their own.
+        # loaded keeps peak memory bounded by one model instead of the sum.
         gc.collect()
         try:
             import mlx.core as mx
@@ -1277,9 +961,6 @@ def _transcribe_prepared(
         speaker_count = len({turn.speaker for turn in turns})
         used_diarization_model = diarization_model
 
-    if on_progress:
-        on_progress("complete", "Transcription complete")
-
     return TranscriptResult(
         text=engine_output.text,
         segments=segments,
@@ -1287,7 +968,7 @@ def _transcribe_prepared(
         duration_min=engine_output.duration_min,
         device=engine_output.device,
         model=resolved_model,
-        engine=engine,
+        engine=DEFAULT_ENGINE,
         speaker_count=speaker_count,
         diarization_model=used_diarization_model,
         words=engine_output.words,
@@ -1298,10 +979,8 @@ def transcribe_file(
     file_path: str,
     model_name: str | None = None,
     language: str | None = None,
-    prompt: str | None = None,
     on_progress: ProgressCallback | None = None,
     *,
-    hotwords_file: str | None = None,
     engine: str = DEFAULT_ENGINE,
     diarize: bool = False,
     diarization_model: str = DEFAULT_DIARIZATION_MODEL,
@@ -1312,8 +991,12 @@ def transcribe_file(
     max_speakers: int | None = None,
     speaker_names: list[str] | None = None,
     word_timestamps: bool = False,
+    gemini: bool = False,
+    gemini_api_key: str | None = None,
+    glossary_file: str | None = None,
+    gemini_model: str | None = None,
 ) -> TranscriptResult:
-    """Transcribe media with the selected engine and optional pyannote."""
+    """Transcribe with Parakeet, optionally diarize and proofread with Gemini."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
     engine = engine.casefold()
@@ -1332,13 +1015,11 @@ def transcribe_file(
         if on_progress:
             on_progress("loading", f"Loading {engine} model {resolved_model}...")
             on_progress("transcribing", "Transcribing...")
-        return _transcribe_prepared(
+        result = _transcribe_prepared(
             prepared_path,
             resolved_model=resolved_model,
             language=language,
-            prompt=_combine_context(prompt, hotwords_file),
             on_progress=on_progress,
-            engine=engine,
             diarize=diarize,
             diarization_model=diarization_model,
             diarization_device=diarization_device,
@@ -1347,8 +1028,34 @@ def transcribe_file(
             min_speakers=min_speakers,
             max_speakers=max_speakers,
             speaker_names=speaker_names,
-            word_timestamps=word_timestamps,
         )
+    if gemini:
+        from .gemini import proofread_segments
+
+        if on_progress:
+            on_progress("correcting", "Correcting transcript with Gemini...")
+        proofread = proofread_segments(
+            result.segments,
+            api_key=gemini_api_key,
+            glossary_path=glossary_file,
+            model=gemini_model,
+        )
+        for segment, text in zip(result.segments, proofread.texts, strict=True):
+            segment.text = text
+        result.text = " ".join(segment.text for segment in result.segments).strip()
+        result.proofreading_model = proofread.model
+        result.proofreading_edits = proofread.accepted_edits
+        result.proofreading_rejected = proofread.rejected_edits
+        result.proofreading_input_tokens = proofread.usage.get("promptTokenCount")
+        result.proofreading_output_tokens = proofread.usage.get("candidatesTokenCount")
+        if on_progress:
+            on_progress(
+                "correcting",
+                f"Gemini applied {proofread.accepted_edits} exact edits",
+            )
+    if on_progress:
+        on_progress("complete", "Transcription complete")
+    return result
 
 
 def result_to_markdown(
@@ -1379,6 +1086,22 @@ def result_to_markdown(
                 f"diarization_model: {result.diarization_model}",
             ]
         )
+    if result.proofreading_model:
+        lines.extend(
+            [
+                f"proofreading_model: {result.proofreading_model}",
+                f"proofreading_edits: {result.proofreading_edits}",
+                f"proofreading_rejected: {result.proofreading_rejected}",
+            ]
+        )
+        if result.proofreading_input_tokens is not None:
+            lines.append(
+                f"proofreading_input_tokens: {result.proofreading_input_tokens}"
+            )
+        if result.proofreading_output_tokens is not None:
+            lines.append(
+                f"proofreading_output_tokens: {result.proofreading_output_tokens}"
+            )
     lines.extend(["---", "", f"# Transcript: {file_name}", ""])
 
     for segment in result.segments:

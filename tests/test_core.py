@@ -1,4 +1,3 @@
-import os
 import sys
 import tempfile
 import unittest
@@ -14,18 +13,12 @@ from free_transcribe.core import (
     TranscriptSegment,
     TranscriptWord,
     _chunked_audio_paths,
-    _combine_context,
     _EngineOutput,
-    _load_hotwords,
     _normalized_audio_path,
     _pyannote_progress_hook,
     _pyannote_waveform_input,
-    _qwen_batch_ladder,
     _transcribe_parakeet,
     _transcribe_parakeet_cuda,
-    _transcribe_qwen,
-    _transcribe_qwen_mlx,
-    _transcribe_qwen_torch,
     assign_speakers_to_words,
     format_timestamp,
     restore_segment_punctuation,
@@ -124,8 +117,8 @@ class MarkdownTests(unittest.TestCase):
             language="ru",
             duration_min=1.0,
             device="mlx",
-            model=DEFAULT_MODELS["qwen"],
-            engine="qwen",
+            model=DEFAULT_MODELS["parakeet"],
+            engine="parakeet",
             speaker_count=2,
             diarization_model="pyannote/community",
         )
@@ -239,135 +232,6 @@ class TranscriptionPipelineTests(unittest.TestCase):
 
         self.assertEqual(parakeet_transcribe.call_args.args[0], "prepared.flac")
         self.assertEqual(diarize.call_args.args[0], "prepared.flac")
-
-    def test_mlx_reports_real_processed_audio_progress(self):
-        events = []
-
-        def fake_transcribe(_path, **options):
-            options["on_progress"](
-                {
-                    "event": "chunks_prepared",
-                    "total_chunks": 4,
-                    "audio_duration_sec": 120.0,
-                    "progress": 0.0,
-                }
-            )
-            options["on_progress"](
-                {
-                    "event": "chunk_completed",
-                    "chunk_index": 1,
-                    "total_chunks": 4,
-                    "audio_duration_sec": 120.0,
-                    "processed_audio_sec": 30.0,
-                    "progress": 0.25,
-                }
-            )
-            return SimpleNamespace(
-                text="Hello",
-                language="English",
-                segments=[],
-                chunks=[{"start": 0.0, "end": 30.0, "text": "Hello"}],
-            )
-
-        with (
-            patch("free_transcribe.core._is_apple_silicon", return_value=True),
-            patch.dict(
-                sys.modules,
-                {"mlx_qwen3_asr": SimpleNamespace(transcribe=fake_transcribe)},
-            ),
-        ):
-            _transcribe_qwen_mlx(
-                "meeting.wav",
-                model_name="test/model",
-                language=None,
-                context=None,
-                need_words=False,
-                on_progress=lambda stage, message: events.append((stage, message)),
-            )
-
-        self.assertEqual(events[0][0], "transcribing")
-        self.assertIn("0% · 00:00 / 02:00 · chunk 0/4", events[0][1])
-        self.assertIn("25% · 00:30 / 02:00 · chunk 1/4", events[1][1])
-
-    def test_qwen_dispatches_to_mlx_on_apple_silicon(self):
-        expected = _EngineOutput("text", [], [], "ru", 0.0, "mlx")
-        with (
-            patch("free_transcribe.core._is_apple_silicon", return_value=True),
-            patch(
-                "free_transcribe.core._transcribe_qwen_mlx", return_value=expected
-            ) as backend,
-        ):
-            result = _transcribe_qwen(
-                "meeting.wav",
-                model_name="test/model",
-                language="ru",
-                context=None,
-                need_words=True,
-            )
-
-        self.assertIs(result, expected)
-        self.assertTrue(backend.call_args.kwargs["need_words"])
-
-    def test_qwen_dispatches_to_torch_off_apple_silicon(self):
-        expected = _EngineOutput("text", [], [], "ru", 0.0, "cuda")
-        with (
-            patch("free_transcribe.core._is_apple_silicon", return_value=False),
-            patch(
-                "free_transcribe.core._transcribe_qwen_torch", return_value=expected
-            ) as backend,
-        ):
-            result = _transcribe_qwen(
-                "meeting.wav",
-                model_name="test/model",
-                language="ru",
-                context=None,
-                need_words=False,
-            )
-
-        self.assertIs(result, expected)
-        backend.assert_called_once()
-
-    def test_qwen_requests_alignment_and_assigns_speakers(self):
-        engine_output = _EngineOutput(
-            text="Hello Hi",
-            segments=[TranscriptSegment(0.0, 1.0, "Hello Hi")],
-            words=[
-                TranscriptWord(0.0, 0.4, " Hello"),
-                TranscriptWord(0.6, 1.0, " Hi"),
-            ],
-            language="English",
-            duration_min=1 / 60,
-            device="mlx",
-        )
-        turns = [
-            SpeakerTurn(0.0, 0.5, "A"),
-            SpeakerTurn(0.5, 1.0, "B"),
-        ]
-
-        with (
-            tempfile.NamedTemporaryFile() as media_file,
-            patch(
-                "free_transcribe.core._transcribe_qwen",
-                return_value=engine_output,
-            ) as qwen_transcribe,
-            patch("free_transcribe.core.diarize_file", return_value=turns),
-        ):
-            result = transcribe_file(
-                media_file.name,
-                engine="qwen",
-                language="en",
-                diarize=True,
-                speaker_names=["Alice", "Bob"],
-            )
-
-        options = qwen_transcribe.call_args.kwargs
-        self.assertTrue(options["need_words"])
-        self.assertEqual(options["model_name"], DEFAULT_MODELS["qwen"])
-        self.assertEqual(
-            [segment.speaker for segment in result.segments], ["Alice", "Bob"]
-        )
-        self.assertEqual(result.speaker_count, 2)
-        self.assertEqual(result.engine, "qwen")
 
     def test_parakeet_engine_uses_its_default_model(self):
         engine_output = _EngineOutput(
@@ -504,29 +368,6 @@ class TranscriptionPipelineTests(unittest.TestCase):
         self.assertEqual([word.text for word in result.words], ["Hello", "world"])
         self.assertEqual(result.segments[0].text, "Hello world")
 
-    def test_qwen_can_request_words_without_diarization(self):
-        engine_output = _EngineOutput(
-            text="Word",
-            segments=[TranscriptSegment(0.0, 0.5, "Word")],
-            words=[TranscriptWord(0.0, 0.5, "Word")],
-            language="English",
-            duration_min=0.5 / 60,
-            device="mlx",
-        )
-        with (
-            tempfile.NamedTemporaryFile() as media_file,
-            patch(
-                "free_transcribe.core._transcribe_qwen",
-                return_value=engine_output,
-            ) as qwen_transcribe,
-        ):
-            result = transcribe_file(
-                media_file.name, engine="qwen", word_timestamps=True
-            )
-
-        self.assertTrue(qwen_transcribe.call_args.kwargs["need_words"])
-        self.assertEqual(result.words, engine_output.words)
-
     def test_rejects_unknown_engine(self):
         with (
             tempfile.NamedTemporaryFile() as media_file,
@@ -537,207 +378,6 @@ class TranscriptionPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class QwenBatchLadderTests(unittest.TestCase):
-    def test_default_ladder_halves_down_to_one(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("FT_QWEN_BATCH", None)
-            self.assertEqual(_qwen_batch_ladder(), [8, 4, 2, 1])
-
-    def test_environment_overrides_starting_batch(self):
-        with patch.dict(os.environ, {"FT_QWEN_BATCH": "4"}):
-            self.assertEqual(_qwen_batch_ladder(), [4, 2, 1])
-
-    def test_non_numeric_value_falls_back_to_default(self):
-        with patch.dict(os.environ, {"FT_QWEN_BATCH": "many"}):
-            self.assertEqual(_qwen_batch_ladder(), [8, 4, 2, 1])
-
-    def test_ladder_never_goes_below_one(self):
-        with patch.dict(os.environ, {"FT_QWEN_BATCH": "0"}):
-            self.assertEqual(_qwen_batch_ladder(), [1])
-
-
-class QwenCudaRetryTests(unittest.TestCase):
-    def _fake_torch(self, oom_error):
-        cuda = SimpleNamespace(
-            is_available=lambda: True,
-            empty_cache=lambda: None,
-            OutOfMemoryError=oom_error,
-        )
-        return SimpleNamespace(bfloat16="bfloat16", cuda=cuda)
-
-    def test_retries_with_smaller_batch_after_out_of_memory(self):
-        class FakeOutOfMemoryError(RuntimeError):
-            pass
-
-        attempted: list[int] = []
-
-        class FakeModel:
-            def __init__(self, batch_size):
-                self.batch_size = batch_size
-
-            def transcribe(self, **kwargs):
-                if self.batch_size > 4:
-                    raise FakeOutOfMemoryError("CUDA out of memory")
-                return [
-                    SimpleNamespace(text="Hello", time_stamps=[], language="English")
-                ]
-
-        def from_pretrained(model_name, **options):
-            attempted.append(options["max_inference_batch_size"])
-            return FakeModel(options["max_inference_batch_size"])
-
-        with (
-            patch.dict(
-                sys.modules,
-                {
-                    "torch": self._fake_torch(FakeOutOfMemoryError),
-                    "qwen_asr": SimpleNamespace(
-                        Qwen3ASRModel=SimpleNamespace(from_pretrained=from_pretrained)
-                    ),
-                },
-            ),
-            patch("free_transcribe.core._media_duration_seconds", return_value=1.0),
-            patch.dict(os.environ, {"FT_QWEN_BATCH": "8"}),
-        ):
-            result = _transcribe_qwen_torch(
-                "meeting.wav",
-                model_name="test/model",
-                language=None,
-                context=None,
-                need_words=False,
-            )
-
-        self.assertEqual(attempted, [8, 4])
-        self.assertEqual(result.text, "Hello")
-
-    def test_reports_failure_when_even_batch_of_one_does_not_fit(self):
-        class FakeOutOfMemoryError(RuntimeError):
-            pass
-
-        class AlwaysFailingModel:
-            def transcribe(self, **kwargs):
-                raise FakeOutOfMemoryError("CUDA out of memory")
-
-        with (
-            patch.dict(
-                sys.modules,
-                {
-                    "torch": self._fake_torch(FakeOutOfMemoryError),
-                    "qwen_asr": SimpleNamespace(
-                        Qwen3ASRModel=SimpleNamespace(
-                            from_pretrained=lambda *a, **k: AlwaysFailingModel()
-                        )
-                    ),
-                },
-            ),
-            patch.dict(os.environ, {"FT_QWEN_BATCH": "2"}),
-            self.assertRaises(RuntimeError) as caught,
-        ):
-            _transcribe_qwen_torch(
-                "meeting.wav",
-                model_name="test/model",
-                language=None,
-                context=None,
-                need_words=False,
-            )
-
-        self.assertIn("batch size of 1", str(caught.exception))
-
-
-class HotwordsTests(unittest.TestCase):
-    def _write(self, content: str) -> str:
-        directory = tempfile.mkdtemp()
-        path = Path(directory) / "glossary.txt"
-        path.write_text(content, encoding="utf-8")
-        return str(path)
-
-    def test_reads_one_term_per_line(self):
-        path = self._write("Kubernetes\nClickHouse\n")
-        self.assertEqual(_load_hotwords(path), "Kubernetes\nClickHouse")
-
-    def test_skips_comments_and_blank_lines(self):
-        path = self._write("# glossary\n\nKafka\n\n  gRPC  \n")
-        self.assertEqual(_load_hotwords(path), "Kafka\ngRPC")
-
-    def test_deduplicates_terms_case_insensitively(self):
-        path = self._write("Mini\nmini\nMINI\nPostgreSQL\n")
-        self.assertEqual(_load_hotwords(path), "Mini\nPostgreSQL")
-
-    def test_limits_glossary_to_prevent_prompt_recitation(self):
-        path = self._write("\n".join(f"term-{index}" for index in range(40)))
-        terms = _load_hotwords(path).splitlines()
-        self.assertEqual(len(terms), 24)
-        self.assertEqual(terms[-1], "term-23")
-
-    def test_limits_total_glossary_size(self):
-        path = self._write("\n".join("x" * 100 + str(index) for index in range(10)))
-        self.assertLessEqual(len(_load_hotwords(path)), 512)
-
-    def test_missing_file_is_not_an_error(self):
-        self.assertEqual(_load_hotwords("/nonexistent/glossary.txt"), "")
-
-    def test_falls_back_to_environment_variable(self):
-        path = self._write("Redis\n")
-        with patch.dict(os.environ, {"FT_HOTWORDS_FILE": path}):
-            self.assertEqual(_load_hotwords(), "Redis")
-
-    def test_prompt_comes_before_glossary(self):
-        path = self._write("Kafka\n")
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("FT_HOTWORDS_FILE", None)
-            self.assertEqual(_combine_context("Anna", path), "Anna\nKafka")
-
-    def test_without_prompt_or_glossary_context_is_none(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("FT_HOTWORDS_FILE", None)
-            self.assertIsNone(_combine_context(None, None))
-
-
-class QwenCudaContextTests(unittest.TestCase):
-    def test_context_reaches_the_cuda_backend(self):
-        captured: dict[str, object] = {}
-
-        class FakeModel:
-            def transcribe(self, **kwargs):
-                captured.update(kwargs)
-                return [
-                    SimpleNamespace(text="Hello", time_stamps=[], language="English")
-                ]
-
-        fake_torch = SimpleNamespace(
-            bfloat16="bfloat16",
-            cuda=SimpleNamespace(
-                is_available=lambda: True,
-                empty_cache=lambda: None,
-                OutOfMemoryError=RuntimeError,
-            ),
-        )
-
-        with (
-            patch.dict(
-                sys.modules,
-                {
-                    "torch": fake_torch,
-                    "qwen_asr": SimpleNamespace(
-                        Qwen3ASRModel=SimpleNamespace(
-                            from_pretrained=lambda *a, **k: FakeModel()
-                        )
-                    ),
-                },
-            ),
-            patch("free_transcribe.core._media_duration_seconds", return_value=1.0),
-        ):
-            _transcribe_qwen_torch(
-                "meeting.wav",
-                model_name="test/model",
-                language=None,
-                context="Kafka\ngRPC",
-                need_words=False,
-            )
-
-        self.assertEqual(captured.get("context"), "Kafka\ngRPC")
 
 
 class ChunkFormatTests(unittest.TestCase):

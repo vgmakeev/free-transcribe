@@ -63,7 +63,7 @@ input[type="number"] { width: 72px; }
 .primary:disabled { cursor: default; opacity: .35; }
 .quiet { color: #333438; background: #e5e2dc; }
 
-.stages { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 18px 0 0; padding: 0; list-style: none; }
+.stages { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; margin: 18px 0 0; padding: 0; list-style: none; }
 .stages li { display: flex; align-items: center; gap: 5px; color: #aaa69e; font-size: 10px; }
 .stages span { display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid #cfcbc3; border-radius: 50%; font-size: 9px; }
 .stages li.active { color: #292a2d; font-weight: 650; }

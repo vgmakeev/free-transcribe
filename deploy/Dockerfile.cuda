@@ -27,7 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
-COPY hotwords.production.txt ./hotwords.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --python 3.14 --no-dev --no-editable \
@@ -61,7 +60,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /opt/python /opt/python
 COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/hotwords.txt /app/hotwords.txt
 
 USER transcribe
 EXPOSE 8000

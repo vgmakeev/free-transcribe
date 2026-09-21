@@ -26,7 +26,6 @@
           Profile
           <select id="engine">
             <option value="parakeet">Fast · Parakeet</option>
-            <option value="qwen-quality">Maximum quality · Qwen 1.7B</option>
           </select>
         </label>
 
@@ -43,6 +42,18 @@
         <label id="count-row" class="count-row hidden">
           Exact count <input id="speaker-count" type="number" min="1" placeholder="auto" />
         </label>
+
+        <label id="names-row" class="count-row">
+          Names <input id="speaker-names" type="text" placeholder="Владимир, Иван" />
+        </label>
+
+        <label class="switch-row">
+          <span>
+            Correct terminology
+            <small>Gemini receives transcript text only</small>
+          </span>
+          <input id="gemini" type="checkbox" checked />
+        </label>
       </section>
 
       <div class="actions">
@@ -55,7 +66,8 @@
         <li data-step="model"><span>1</span>Model</li>
         <li data-step="transcription"><span>2</span>Text</li>
         <li data-step="speakers"><span>3</span>Speakers</li>
-        <li data-step="done"><span>4</span>Done</li>
+        <li data-step="correct"><span>4</span>Correct</li>
+        <li data-step="done"><span>5</span>Done</li>
       </ol>
 
       <section id="status" class="status" aria-live="polite">
