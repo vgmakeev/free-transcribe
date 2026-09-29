@@ -1,0 +1,11 @@
+{
+  "name": "free-transcribe",
+  "displayName": "Free Transcribe",
+  "description": "Transcribe local recordings on a free-transcribe server: local audio compression, upload, speaker labels and Gemini correction",
+  "author": {
+    "name": "Free Transcribe contributors"
+  },
+  "repository": "https://github.com/vgmakeev/free-transcribe",
+  "license": "MIT",
+  "keywords": ["transcription", "speech-to-text", "diarization", "meetings"]
+}

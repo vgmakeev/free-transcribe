@@ -9,11 +9,12 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -32,6 +33,7 @@ from .core import (
 from .gemini import gemini_available
 
 WEB_ROOT = Path(__file__).with_name("web")
+EXPIRY_SWEEP_SECONDS = 300.0
 
 
 def _now() -> str:
@@ -68,6 +70,8 @@ class _Job:
     result_path: Path | None = None
     error: str | None = None
     progress_percent: float | None = None
+    finished_at: float | None = None
+    expires_at: str | None = None
 
     def public(self) -> dict[str, Any]:
         progress: dict[str, Any] = {"stage": self.stage, "message": self.message}
@@ -81,6 +85,8 @@ class _Job:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
         }
+        if self.expires_at:
+            payload["expires_at"] = self.expires_at
         if self.status == "succeeded":
             payload["result_url"] = f"/v1/transcriptions/{self.id}/result"
         if self.error:
@@ -118,8 +124,15 @@ def create_app(
     max_upload_mb: int | None = None,
     max_queue: int | None = None,
     require_cuda: bool | None = None,
+    result_ttl_hours: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
-    """Create a self-contained API app; model dependencies remain lazy."""
+    """Create a self-contained API app; model dependencies remain lazy.
+
+    Finished jobs are kept for `result_ttl_hours` (`FT_RESULT_TTL_HOURS`,
+    24 by default, 0 keeps them until deleted). The uploaded media is removed
+    as soon as the job finishes: only the Markdown result is retained.
+    """
     configured_token = token if token is not None else os.getenv("FT_API_TOKEN", "")
     worker_count = (
         concurrency
@@ -142,12 +155,20 @@ def create_app(
         if require_cuda is not None
         else os.getenv("FT_REQUIRE_CUDA", "").casefold() in {"1", "true", "yes"}
     )
+    ttl_hours = (
+        result_ttl_hours
+        if result_ttl_hours is not None
+        else float(os.getenv("FT_RESULT_TTL_HOURS", "24"))
+    )
     if worker_count < 1:
         raise ValueError("API concurrency must be at least 1")
     if upload_limit < 1:
         raise ValueError("upload limit must be positive")
     if queue_limit < 0:
         raise ValueError("queue limit cannot be negative")
+    if ttl_hours < 0:
+        raise ValueError("result TTL cannot be negative")
+    ttl_seconds = ttl_hours * 3600
 
     jobs: dict[str, _Job] = {}
     tasks: dict[str, asyncio.Task[None]] = {}
@@ -155,6 +176,23 @@ def create_app(
     inference_slots = asyncio.Semaphore(worker_count)
     admission_lock = asyncio.Lock()
     uploads_in_progress = 0
+
+    def discard(job: _Job) -> None:
+        jobs.pop(job.id, None)
+        shutil.rmtree(job.work_dir, ignore_errors=True)
+
+    def purge_expired() -> None:
+        if not ttl_seconds:
+            return
+        now = clock()
+        for job in list(jobs.values()):
+            if job.finished_at is not None and now - job.finished_at >= ttl_seconds:
+                discard(job)
+
+    async def sweep_expired() -> None:
+        while True:
+            await asyncio.sleep(EXPIRY_SWEEP_SECONDS)
+            purge_expired()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -167,7 +205,12 @@ def create_app(
                 raise RuntimeError(
                     "FT_REQUIRE_CUDA is set but no NVIDIA CUDA device is available"
                 )
+        sweeper = asyncio.create_task(sweep_expired()) if ttl_seconds else None
         yield
+        if sweeper is not None:
+            sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper
         for task in tasks.values():
             task.cancel()
         for job in jobs.values():
@@ -200,6 +243,7 @@ def create_app(
             raise HTTPException(status_code=401, detail="Invalid bearer token")
 
     def find_job(job_id: str) -> _Job:
+        purge_expired()
         job = jobs.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Transcription not found")
@@ -295,6 +339,13 @@ def create_app(
                 publish(job)
             finally:
                 job.completed_at = _now()
+                job.finished_at = clock()
+                if ttl_seconds:
+                    job.expires_at = (
+                        datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+                    ).isoformat()
+                # The media is only needed for inference; keep the transcript.
+                job.source_path.unlink(missing_ok=True)
                 _release_gpu_memory()
 
     @app.get("/health")
@@ -488,8 +539,7 @@ def create_app(
         job = find_job(job_id)
         if job.status in {"queued", "running"}:
             raise HTTPException(status_code=409, detail=f"Job is {job.status}")
-        jobs.pop(job_id)
-        shutil.rmtree(job.work_dir, ignore_errors=True)
+        discard(job)
 
     return app
 

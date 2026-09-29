@@ -1,0 +1,14 @@
+{
+  "name": "free-transcribe",
+  "description": "Agent plugins for the free-transcribe server",
+  "owner": {
+    "name": "Free Transcribe contributors"
+  },
+  "plugins": [
+    {
+      "name": "free-transcribe",
+      "source": "./plugins/free-transcribe",
+      "description": "Transcribe local recordings on a free-transcribe server"
+    }
+  ]
+}
