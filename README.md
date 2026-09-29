@@ -93,6 +93,7 @@ Useful environment variables:
 | `FT_REQUIRE_CUDA` | `1` in the image | fail startup without CUDA |
 | `FT_GEMINI_MODEL` | `gemini-3.8-flash` | proofreading model |
 | `FT_GLOSSARY_FILE` | bundled glossary | custom JSON glossary |
+| `FT_RESULT_TTL_HOURS` | `24` | hours a finished transcript is kept; `0` keeps it until deleted |
 
 ## HTTP API
 
@@ -109,6 +110,35 @@ Useful environment variables:
 | `gemini` | boolean | run text correction |
 
 The response is a job resource. Read progress with `GET /v1/transcriptions/{id}/events`, then download Markdown from the returned `result_url`.
+
+The uploaded media is deleted as soon as a job finishes, successfully or not; only the Markdown result is kept. A finished job reports `expires_at` and disappears after `FT_RESULT_TTL_HOURS`, or earlier with `DELETE /v1/transcriptions/{id}`. Jobs live in process memory, so a restart drops them as well.
+
+## Agent plugin
+
+`plugins/free-transcribe` is a Claude Code plugin whose `transcribe` skill sends local recordings to a running server. The skill's script extracts and compresses the audio track with ffmpeg when available (opus 48 kbit/s mono, about 20 MB per hour; recognised text stays practically identical to lossless input), uploads it, waits for the job and saves `<recording>.transcript.md` next to the file. An interrupted run resumes with `--resume <job-id>` instead of uploading again.
+
+```bash
+claude plugin marketplace add vgmakeev/free-transcribe
+claude plugin install free-transcribe@free-transcribe
+```
+
+Point it at the server in `~/.claude/settings.json`; the password never enters the conversation:
+
+```json
+{
+  "env": {
+    "TRANSCRIBE_URL": "https://transcribe.example.com",
+    "TRANSCRIBE_AUTH": "user:password"
+  }
+}
+```
+
+`TRANSCRIBE_AUTH` is HTTP Basic auth for a reverse proxy in front of the API; for direct access set `TRANSCRIBE_TOKEN` to the `FT_API_TOKEN` value instead. Then ask the agent to transcribe a file, or run the script yourself:
+
+```bash
+plugins/free-transcribe/skills/transcribe/scripts/transcribe.sh --check
+plugins/free-transcribe/skills/transcribe/scripts/transcribe.sh meeting.mp4 --names 'Владимир,Иван'
+```
 
 ## Agent commands
 
