@@ -6,7 +6,6 @@ description: >-
   transcribe, decode or get the text of a recording ("транскрибируй", "расшифруй запись",
   "сделай стенограмму встречи", "что говорили на созвоне" with a media file), or points at an
   mp3/m4a/wav/ogg/flac/mp4/webm/mkv/mov file and wants its contents as text.
-argument-hint: "[media-file] [speaker names]"
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/transcribe.sh *)
 ---
 
@@ -17,22 +16,22 @@ The bundled script does the whole job: it extracts and compresses the audio trac
 server and saves the transcript next to the recording as `<name>.transcript.md`. Do not build
 curl requests by hand and do not convert the file yourself: the script already does both.
 
+**Where the script is.** It is `scripts/transcribe.sh` inside this skill's directory, the one that
+contains this `SKILL.md`. In Claude Code that path is `${CLAUDE_SKILL_DIR}/scripts/transcribe.sh`.
+If the previous sentence shows a literal `${CLAUDE_SKILL_DIR}`, your agent does not substitute it:
+build the absolute path from the location you loaded this file from instead. Below, `transcribe.sh`
+means that absolute path.
+
 ## 1. Check the setup once
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/transcribe.sh --check
+transcribe.sh --check
 ```
 
 It reads `TRANSCRIBE_URL` and either `TRANSCRIBE_AUTH` (`user:password`, HTTP Basic auth in front of
-the server) or `TRANSCRIBE_TOKEN` (API bearer token) from the environment. If it reports that a
-variable is missing or the credentials are rejected, stop and ask the user to set them, for example
-in `~/.claude/settings.json`:
-
-```json
-{ "env": { "TRANSCRIBE_URL": "https://transcribe.example.com", "TRANSCRIBE_AUTH": "user:password" } }
-```
-
-Never ask the user to paste the password into the chat and never print it.
+the server) or `TRANSCRIBE_TOKEN` (API bearer token) from the environment. If a variable is missing
+or the credentials are rejected, stop and point the user to the setup guide:
+https://github.com/vgmakeev/free-transcribe/blob/main/AGENT_SETUP.md. Never print the password.
 
 ## 2. Collect what the server needs
 
@@ -51,8 +50,12 @@ An hour of audio takes several minutes (upload plus processing), longer than a n
 timeout, so run it in the background and wait for it to finish:
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/transcribe.sh "/path/to/recording.mp4" --names "Артём,Кандидат"
+transcribe.sh "/path/to/recording.mp4" --names "Артём,Кандидат"
 ```
+
+The command needs network access and writes next to the recording, which may be outside the
+current workspace. In a sandboxed agent (Codex and similar) request approval to run it with network
+and write access rather than trying another way.
 
 The script prints progress to stderr and the path of the saved transcript as the last line of
 stdout. Options: `--out FILE` to choose the destination, `--language ru` as a language hint,
@@ -63,7 +66,7 @@ server itself keeps results for at most 24 hours).
 
 - The job id is printed right after the upload (`job <id> accepted`). If the run is interrupted
   (network drop, timeout, closed session), do **not** upload again: resume with
-  `${CLAUDE_SKILL_DIR}/scripts/transcribe.sh --resume <id> --out "<same output path>"`.
+  `transcribe.sh --resume <id> --out "<same output path>"`.
 - `404` on resume means the job expired or was already downloaded.
 - `queue is full` is retried automatically; `too large` or `unsupported media format` means the
   file needs converting to audio first (install ffmpeg, or ask the user for an audio export).

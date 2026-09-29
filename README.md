@@ -117,12 +117,25 @@ The uploaded media is deleted as soon as a job finishes, successfully or not; on
 
 `plugins/free-transcribe` is a Claude Code plugin whose `transcribe` skill sends local recordings to a running server. The skill's script extracts and compresses the audio track with ffmpeg when available (opus 48 kbit/s mono, about 20 MB per hour; recognised text stays practically identical to lossless input), uploads it, waits for the job and saves `<recording>.transcript.md` next to the file. An interrupted run resumes with `--resume <job-id>` instead of uploading again.
 
+The quickest setup is to let the agent do it. Tell Claude Code, Codex or another agent that supports `SKILL.md` skills:
+
+> Set up transcription following https://github.com/vgmakeev/free-transcribe/blob/main/AGENT_SETUP.md, the server is https://transcribe.example.com
+
+It installs the skill, asks for the credentials, stores them and checks the connection. Manual install for Claude Code:
+
 ```bash
 claude plugin marketplace add vgmakeev/free-transcribe
 claude plugin install free-transcribe@free-transcribe
 ```
 
-Point it at the server in `~/.claude/settings.json`; the password never enters the conversation:
+For Codex, link the skill from a clone into `~/.agents/skills` and update it with `git pull`:
+
+```bash
+git clone https://github.com/vgmakeev/free-transcribe.git ~/.local/share/free-transcribe
+ln -s ~/.local/share/free-transcribe/plugins/free-transcribe/skills/transcribe ~/.agents/skills/transcribe
+```
+
+Point it at the server in `~/.claude/settings.json` (for Codex, `export` the same variables in your shell startup file); set this way, the password never enters the conversation:
 
 ```json
 {
